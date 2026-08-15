@@ -21,7 +21,45 @@ API: review chạy trên tài khoản ChatGPT Plus bản web của bạn.
 
 ## Cài đặt
 
-### 1. Chuẩn bị thư mục bridge
+### Nhanh nhất — chạy 1 lệnh (tự động hoàn toàn)
+
+```bash
+git clone https://github.com/Akbi47/opencode-chatgpt-review.git
+cd opencode-chatgpt-review
+bash install.sh
+```
+
+`install.sh` tự làm hết: copy agent/skill/command/plugin vào `~/.config/opencode/`,
+`npm install`, cài Playwright Chromium, và cài system libraries cho Chromium
+(ưu tiên sudo; không có sudo thì tự tải `.deb` giải nén vào `libs/` user-space).
+
+Sau đó chỉ còn 2 việc tay:
+
+```bash
+~/.config/opencode/chatgpt-bridge/bin/chatgpt-review login   # đăng nhập ChatGPT (1 lần)
+~/.config/opencode/chatgpt-bridge/bin/chatgpt-review status   # phải ra "loggedIn": true
+```
+
+Rồi **restart opencode**.
+
+### Giao cho agent khác tự setup (đổi máy / nhờ người khác)
+
+Chỉ cần đưa prompt sau (kèm repo này đã clone sẵn hoặc URL repo) — agent sẽ đọc
+`AGENTS.md` trong repo và tự làm:
+
+```text
+Setup the ChatGPT review bridge from this repo on this machine:
+clone it if not present, run `bash install.sh`, then run
+`~/.config/opencode/chatgpt-bridge/bin/chatgpt-review login` and have me sign in,
+then verify with `status` shows loggedIn:true. Follow AGENTS.md exactly.
+```
+
+Repo đã có sẵn `AGENTS.md` hướng dẫn từng bước, gồm cả phần verification checklist
+và troubleshooting cho agent.
+
+### Cài thủ công (nếu muốn tự kiểm soát từng bước)
+
+#### 1. Chuẩn bị thư mục bridge
 
 ```bash
 mkdir -p ~/.config/opencode/chatgpt-bridge/bin
@@ -34,9 +72,10 @@ cd ~/.config/opencode/chatgpt-bridge && npm install
 > **Yêu cầu hệ thống**: Linux cần `libnspr4`, `libnss3`, `libasound2` cho Chromium.
 > Nếu không có quyền sudo, tải `.deb` và giải nén vào `libs/` rồi set `LD_LIBRARY_PATH`
 > (script đã tự động thêm `libs/` vào `LD_LIBRARY_PATH`). Cài Playwright chromium
-> theo version khớp `package.json` (hiện `1.62.1`, thư mục `chromium-1234`).
+> theo version khớp `package.json`. Bridge **tự tìm** Chromium trong
+> `~/.cache/ms-playwright` — không hardcode version nên không cần chỉnh khi đổi máy.
 
-### 2. Cài agent, skill, command, plugin vào opencode
+#### 2. Cài agent, skill, command, plugin vào opencode
 
 ```bash
 cp agent/chatgpt-review.md       ~/.config/opencode/agent/
@@ -163,6 +202,8 @@ Lệnh CLI tương đương: `.../chatgpt-review project list|create|attach|deta
 ## Cấu trúc thư mục
 
 ```
+install.sh                    # setup tự động (config + npm + chromium + system libs)
+AGENTS.md                     # runbook cho agent tự setup trên máy mới
 bin/chatgpt-review.mjs       # script bridge chính (Playwright)
 bin/chatgpt-review           # wrapper bash
 bin/autoreview               # toggle auto-review state
@@ -173,3 +214,15 @@ plugin/chatgpt-autoreview.ts # plugin: chèn chỉ dẫn auto-review + env
 package.json                 # dependency: playwright
 bridge-config.json           # cấu hình ngưỡng + chế độ project
 ```
+
+## Đổi máy — checklist
+
+1. Clone repo này: `git clone https://github.com/Akbi47/opencode-chatgpt-review.git`
+2. `bash install.sh`
+3. `.../chatgpt-review login` → đăng nhập ChatGPT → chờ "LOGIN OK"
+4. `.../chatgpt-review status` → `loggedIn: true`
+5. Restart opencode → `@chatgpt-review` dùng được ngay.
+
+Hoặc đơn giản hơn: đưa repo (hoặc URL repo) cho bất kỳ agent nào kèm prompt
+trong mục **Giao cho agent khác tự setup** ở trên — agent tự chạy mọi bước theo
+`AGENTS.md`.

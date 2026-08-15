@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, basename } from 'node:path'
 import { execSync } from 'node:child_process'
@@ -15,7 +15,33 @@ const PROJECTS_FILE = join(BRIDGE_DIR, 'projects.json')
 
 process.env.LD_LIBRARY_PATH = `${LIB_DIR}${process.env.LD_LIBRARY_PATH ? ':' + process.env.LD_LIBRARY_PATH : ''}`
 
-const EXECUTABLE = join(HOME, '.cache/ms-playwright/chromium-1234/chrome-linux64/chrome')
+function resolveChromium() {
+  // Prefer the Playwright-bundled chromium (version-agnostic).
+  try {
+    const p = chromium.executablePath()
+    if (p && existsSync(p)) return p
+  } catch {}
+  // Fallback: find any ms-playwright chromium build in the user cache.
+  const cacheRoot = join(HOME, '.cache', 'ms-playwright')
+  try {
+    const dirs = readdirSync(cacheRoot).sort().reverse()
+    for (const d of dirs) {
+      if (!d.startsWith('chromium-')) continue
+      const candidates = [
+        join(cacheRoot, d, 'chrome-linux', 'chrome'),
+        join(cacheRoot, d, 'chrome-linux64', 'chrome'),
+        join(cacheRoot, d, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'),
+        join(cacheRoot, d, 'chrome-win', 'chrome.exe'),
+      ]
+      for (const c of candidates) {
+        if (existsSync(c)) return c
+      }
+    }
+  } catch {}
+  throw new Error('Chromium not found. Run: npm exec playwright install chromium  (or: ~/.config/opencode/chatgpt-bridge/install.sh)')
+}
+
+const EXECUTABLE = resolveChromium()
 const CHAT_URL = 'https://chatgpt.com/'
 
 const args = process.argv.slice(2)
