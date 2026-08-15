@@ -1,78 +1,118 @@
 ---
 name: chatgpt-review
-description: Use when the user wants a response, diff, plan, or code reviewed by ChatGPT Plus (web) without copy-pasting. Also triggered by "review with chatgpt", "gửi cho chatgpt review", "review ngoài", or when a task finishes and auto-review is enabled. Sends content to ChatGPT Plus via a browser bridge and returns the review.
+description: Use when a completed task's final result text should be independently reviewed by ChatGPT Plus (web) without copy-pasting. The bridge wraps the result in structured workflow context (mode, goal, stage, requested decision, next-action semantics, authority) and returns a machine-actionable verdict that advances the workflow. Also triggered by "review with chatgpt", "gửi cho chatgpt review", "review ngoài", or auto-review after a task completes.
 ---
 
 # chatgpt-review
 
-Send a prompt to ChatGPT Plus (web) through a Playwright bridge and read the reply back into the session. The user does **not** need to copy-paste.
+Send a completed task's **final result summary** to ChatGPT Plus (web) through a
+Playwright bridge, wrapped in a small structured workflow envelope, and read back
+a machine-actionable verdict. The user does **not** copy-paste anything.
+
+## What gets reviewed
+
+The implementing agent's own result text — e.g. "Done / What changed / Verification".
+**Never** send raw git diffs through the bridge. ChatGPT is instructed to inspect
+GitHub state itself when it needs deeper verification.
+
+## Handoff envelope
+
+The review prompt sent to ChatGPT is a small structured envelope, not a conversation dump:
+
+```text
+MODE: implementation-review | bugfix-review | followup-review | pre-pr-review | pr-review | planning-review | continuation-review
+GOAL: <overall goal>
+CURRENT_STAGE: IMPLEMENTING | IMPLEMENTATION_COMPLETE | CHATGPT_REVIEW | OPENCODE_FIXES | APPROVED
+TASK_SUMMARY: <one line>
+RESULT_TEXT: <verbatim summary>
+REQUESTED_DECISION: <what ChatGPT decides>
+NEXT_ACTION_IF_APPROVED: ...
+NEXT_ACTION_IF_CHANGES_REQUESTED: ...
+REPO / BRANCH / HEAD_SHA / PR / BASE
+AUTHORITY: ChatGPT=review; OpenCode=implement; Human=merge/deploy
+```
+
+## Review-response contract (ChatGPT must return)
+
+```text
+VERDICT: approve | approve-with-changes | request-changes | reject
+NEXT_ACTION: <single explicit next action>
+ISSUES: <numbered issues, or "none">
+SUGGESTIONS: <optional>
+```
+
+Semantics:
+- **approve** — no blocking work remains.
+- **approve-with-changes** — only non-blocking cleanup; state whether re-review is needed.
+- **request-changes** — OpenCode must fix, then re-review.
+- **reject** — replan before continuing.
+
+## State machine
+
+```text
+IMPLEMENTING → IMPLEMENTATION_COMPLETE → CHATGPT_REVIEW
+   → REQUEST_CHANGES → OPENCODE_FIXES → RE-REVIEW (loop)
+   → APPROVED → HUMAN_ACTION_REQUIRED (awaiting human merge)
+```
+
+## Eliminating redundant review loops
+
+Approval state is stored per repo+branch in `chats.json` (via
+`chatgpt-review approval set|get|clear`). Before reviewing, check:
+
+- If `approval.get` returns `approve` and current HEAD SHA equals the stored
+  `headSha` and nothing materially changed → **do not re-review**; report
+  "awaiting human merge".
+- If HEAD SHA changed, base rebased, CI failed, or fixes were applied → re-review.
+
+"approve" does **not** mean OpenCode may merge. It means "ready for human merge".
 
 ## Requirements
 
-- First-time setup must be done once: run `chatgpt-review login` in a terminal (opens a visible browser to sign in to ChatGPT). Verify with `chatgpt-review status` (must show `"loggedIn": true`).
-- The bridge script is at `~/.config/opencode/chatgpt-bridge/bin/chatgpt-review`.
+- One-time setup: `~/.config/opencode/chatgpt-bridge/bin/chatgpt-review login`
+  (opens a browser to sign in), verify with `status` → `"loggedIn": true`.
+- Bridge lives at `~/.config/opencode/chatgpt-bridge/bin/chatgpt-review`.
 
-## Workflow
+## Concurrency
 
-1. Check the bridge is ready:
-   ```
-   ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review status
-   ```
-   If `loggedIn` is `false`, tell the user to run `~/.config/opencode/chatgpt-bridge/bin/chatgpt-review login` in a terminal first.
+The bridge uses a **single Chrome profile** and serializes every run through a
+lock file (`~/.config/opencode/chatgpt-bridge/.lock`). If two repos trigger a
+review simultaneously, one waits for the other; it does not crash. If a run is
+stuck, a stale lock (dead PID) is auto-cleared.
 
-2. Build the review prompt. Write it to a temp file, e.g. `/tmp/opencode/chatgpt-review-prompt.md`. A good review prompt includes:
-   - What the task was (1-2 sentences).
-   - The actual code/diff/output to review (git diff, relevant files, the plan, or the response text).
-   - What to focus on (bugs, security, correctness, style, suggested improvements).
-   - Ask for a concise verdict in a fixed format, e.g.:
-     ```
-     VERDICT: approve / approve-with-changes / reject
-     ISSUES: bullet list (with file:line when relevant)
-     SUGGESTIONS: prioritized short list
-     ```
-3. Send it:
-   ```
-   ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review ask --file=/tmp/opencode/chatgpt-review-prompt.md
-   ```
-   The script prints ChatGPT's reply to stdout.
+## Subcommands
 
-4. Read the reply. If it failed (e.g. not signed in, UI changed), tell the user what to fix.
+```text
+chatgpt-review login|ask|status|chats|reset|project <...>
+chatgpt-review approval get|set <verdict> <sha> [pr]|clear
+```
+
+- `ask` — send a prompt (reads stdin or `--file=`); reuse per repo+branch.
+- `approval` — read/write the workflow approval state used to avoid loops.
+- `project` — manage ChatGPT Projects (list/create/attach/detach/resolve).
 
 ## Conversation reuse (per repo + branch)
 
-The bridge keeps **one ChatGPT thread per repo+branch** (`chats.json`) so reviews
-for the same branch build on prior context instead of spawning new chats.
+One ChatGPT thread per repo+branch (`chats.json`); a new thread is started when
+stale (`max_chars` / `max_turns` / `max_age_hours` in `bridge-config.json`) or a
+saved id fails to open. Force a fresh thread with `ask --new` or `/chatgpt-new`.
+Inspect with `chats`; drop mapping with `reset`.
 
-- On `ask`, the bridge reuses the saved conversation unless it is stale, or it
-  opens a fresh one and records the new chat id.
-- Fallback: if a saved conversation id fails to open, it starts a new one
-  automatically (no user action needed).
-- New conversation triggers (see `~/.config/opencode/chatgpt-bridge/bridge-config.json`):
-  - `max_chars` (default 400000) — accumulated prompt+reply characters
-  - `max_turns` (default 40) — number of exchanges
-  - `max_age_hours` (default 48) — since last use
-- Force a fresh thread: `.../chatgpt-review ask --new` or `/chatgpt-new` command.
-- Inspect state: `.../chatgpt-review chats` and `.../chatgpt-review reset`.
+## ChatGPT Projects
 
-## ChatGPT Projects support
+Optionally organize reviews into one ChatGPT Project per repo:
+- Enable per repo via `project_mode` or globally `"mode": "project"`, or per-call `ask --project`.
+- The bridge reuses/creates the project and keeps the thread inside it.
+- Manage with `project list|create|attach|detach|resolve` or `/chatgpt-project`.
 
-Instead of loose chats, reviews can live inside a **ChatGPT Project** (one per
-repo) so they are organized, share project instructions, and keep project memory.
+## Failure handling
 
-- Enabled per repo via `project_mode: { "<repoName>": true }` in `bridge-config.json`,
-  or globally with `"mode": "project"`, or per-call with `ask --project`.
-- On `ask`, the bridge auto-uses the repo's project; if none exists it **creates
-  one named after the repo** (or uses `--project=<name>` to target an existing one).
-- Chat reuse still applies inside the project (same repo+branch thread, same
-  chars/turns/age thresholds).
-- Manage projects: `.../chatgpt-review project list|create|attach|detach|resolve`,
-  or the `/chatgpt-project` command.
-- `ask --no-project` forces plain chat for that call.
-- Fallback: if a saved project or chat fails to open, the bridge falls back to a
-  plain conversation automatically.
+- `loggedIn: false` → report, do not review.
+- Bridge error → surface the exact error; never claim a false success or approval.
+- Cloudflare may block headless; `ask` runs headful by default (needs a display; use `xvfb-run` on headless servers).
 
 ## Notes
 
-- Use `git diff` for uncommitted changes; `git diff <base>..HEAD` for committed work. Ask the user which scope they want if it is ambiguous.
-- ChatGPT's web UI changes occasionally; if selectors break, the script throws a descriptive error. Do not silently claim a review succeeded when the bridge errored.
-- If the user wants a quick check, keep the prompt tight: send the diff plus 3 focus questions, not a wall of context.
+- Only send result summary text, never raw diffs.
+- Keep the envelope tight (small, structured), not a wall of context.
+- ChatGPT UI changes occasionally; if selectors break, the bridge throws a descriptive error.

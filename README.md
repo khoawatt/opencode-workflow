@@ -1,7 +1,10 @@
 # ChatGPT Review Bridge for OpenCode
 
-Tự động gửi response/diff/plan của agent lên **ChatGPT Plus (web)** để review và
-đọc kết quả về trong session — **không cần copy-paste thủ công**.
+Tự động gửi **kết quả tổng kết task** của agent (text summary "Done / What changed
+/ Verification") lên **ChatGPT Plus (web)** như một **reviewer độc lập, workflow-aware**:
+bọc kết quả trong một envelope ngữ cảnh nhỏ gọn (MODE / GOAL / CURRENT_STAGE /
+REQUESTED_DECISION / AUTHORITY) và đọc về **verdict machine-actionable** giúp tiến
+workflow — không cần copy-paste, không gửi raw git diff.
 
 Sử dụng Playwright + Chrome (profile đăng nhập sẵn) làm cầu nối. Không tốn quota
 API: review chạy trên tài khoản ChatGPT Plus bản web của bạn.
@@ -11,9 +14,16 @@ API: review chạy trên tài khoản ChatGPT Plus bản web của bạn.
 ## Tính năng
 
 - Gọi tay: `@chatgpt-review` từ session opencode.
-- Auto-review: sau mỗi task có thay đổi code, agent tự gửi diff lên ChatGPT và báo verdict.
-- **Reuse chat theo repo + branch**: mỗi repo+branch có 1 thread ChatGPT riêng, context tích lũy — không tạo new chat vô tội vạ.
-- **ChatGPT Projects**: 1 project/repo, review gom gọn, hưởng project memory + custom instructions.
+- Auto-review: sau mỗi task có thay đổi code, agent tự gửi **text summary kết quả**
+  lên ChatGPT và báo verdict (không gửi git diff).
+- **Workflow-aware**: envelope ghi rõ mục tiêu, giai đoạn, quyết định cần ChatGPT
+  đưa ra, next-action nếu approve / request-changes, và phân quyền từng bên.
+- **Chống vòng lặp review**: lưu trạng thái `approve` + HEAD SHA; nếu state chưa đổi
+  thì không review lại, chỉ báo "awaiting human merge".
+- **Reuse chat theo repo + branch**: mỗi repo+branch có 1 thread ChatGPT riêng, context tích lũy.
+- **ChatGPT Projects**: 1 project/repo, hưởng project memory + custom instructions.
+- **Concurrency-safe**: file lock serialize mọi lần chạy (1 Chrome profile dùng chung)
+  → 2 repo chạy song song không đụng nhau; stale lock (PID chết) tự dọn.
 - Fallback an toàn: chat/project lưu bị hỏng → tự mở mới, không crash.
 - Headful (mặc định) để vượt Cloudflare; có thể thử `--headless`.
 
@@ -114,10 +124,40 @@ Thoát session hiện tại và mở lại để load agent/skill/command/plugin
 Trong session opencode (chạy trong repo của bạn):
 
 ```
-@chatgpt-review review git diff hiện tại theo Issue này
+@chatgpt-review review kết quả task vừa hoàn thành: <dán text summary "Done / What changed / Verification">
 ```
 
-Subagent tự đóng gói diff → gửi lên ChatGPT Plus → đọc verdict về.
+Hoặc đơn giản hơn, khi agent vừa báo xong kết quả:
+
+```
+@chatgpt-review review kết quả task bạn vừa trả lời
+```
+
+Subagent bọc text summary đó trong envelope workflow (mode/goal/stage/decision/
+authority), gửi lên ChatGPT Plus, đọc verdict machine-actionable về.
+
+### Verdict & chống vòng lặp review
+
+ChatGPT trả về:
+
+```text
+VERDICT: approve | approve-with-changes | request-changes | reject
+NEXT_ACTION: <hành động tiếp theo>
+ISSUES: <danh sách hoặc "none">
+SUGGESTIONS: <tùy chọn>
+```
+
+Trạng thái phê duyệt lưu theo repo+branch (`approval` trong `chats.json`):
+
+```bash
+.../chatgpt-review approval get                          # xem trạng thái phê duyệt
+.../chatgpt-review approval set approve <headSha> [pr]   # ghi phê duyệt (subagent tự ghi)
+.../chatgpt-review approval clear                        # xóa
+```
+
+- Đã `approve` + HEAD SHA không đổi → **không review lại**, chỉ báo "awaiting human merge".
+- HEAD SHA đổi / có fix mới / CI fail → review lại.
+- `approve` **không** có nghĩa là OpenCode được merge — merge là quyền human.
 
 ### Auto-review
 

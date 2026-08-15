@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, openSync, writeSync, closeSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, basename } from 'node:path'
 import { execSync } from 'node:child_process'
@@ -12,6 +12,7 @@ const LIB_DIR = join(BRIDGE_DIR, 'libs')
 const STATE_FILE = join(BRIDGE_DIR, 'chats.json')
 const CONFIG_FILE = join(BRIDGE_DIR, 'bridge-config.json')
 const PROJECTS_FILE = join(BRIDGE_DIR, 'projects.json')
+const LOCK_FILE = join(BRIDGE_DIR, '.lock')
 
 process.env.LD_LIBRARY_PATH = `${LIB_DIR}${process.env.LD_LIBRARY_PATH ? ':' + process.env.LD_LIBRARY_PATH : ''}`
 
@@ -97,6 +98,7 @@ USAGE:
   chatgpt-review.mjs status         Check whether a signed-in profile exists.
   chatgpt-review.mjs chats          List per-repo conversation state.
   chatgpt-review.mjs reset          Drop the saved conversation mapping for the current repo+branch.
+  chatgpt-review.mjs approval       Get/set/clear the review approval state (get|set <verdict> <sha>|clear).
   chatgpt-review.mjs project        Manage ChatGPT Projects (create/list/attach/detach/resolve).
   chatgpt-review.mjs projects       Alias for "project list".
 
@@ -117,6 +119,44 @@ CONFIG (bridge-config.json):
 }
 
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
+
+// ---------- cross-process lock (serialize bridge runs: 1 Chrome profile) ----------
+
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true } catch { return false }
+}
+
+function acquireLock(timeoutSec = 300) {
+  mkdirSync(BRIDGE_DIR, { recursive: true })
+  const deadline = Date.now() + timeoutSec * 1000
+  while (true) {
+    try {
+      const fd = openSync(LOCK_FILE, 'wx')
+      writeSync(fd, String(process.pid))
+      closeSync(fd)
+      return
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e
+    }
+    // Lock exists: is the owner still alive? If not, clear stale lock.
+    let ownerPid = null
+    try { ownerPid = parseInt(readFileSync(LOCK_FILE, 'utf8').trim(), 10) } catch {}
+    if (ownerPid && !pidAlive(ownerPid)) {
+      try { unlinkSync(LOCK_FILE) } catch {}
+      continue
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`another chatgpt-review is running (pid=${ownerPid || '?'}); timed out after ${timeoutSec}s waiting for the lock`)
+    }
+    console.error(`[bridge] waiting for lock (pid=${ownerPid || '?'})…`)
+    // synchronous sleep (no async in this path)
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000)
+  }
+}
+
+function releaseLock() {
+  try { unlinkSync(LOCK_FILE) } catch {}
+}
 
 // ---------- state / config ----------
 
@@ -597,6 +637,33 @@ async function doReset() {
   console.log(had ? `reset ${key} — next ask will start a new conversation` : `no saved chat for ${key}`)
 }
 
+async function doApproval() {
+  const sub = args[1] || 'get'
+  const key = repoKey()
+  const chats = loadChats()
+  const entry = chats.chats[key] || {}
+
+  if (sub === 'get') {
+    console.log(JSON.stringify(entry.approval || null))
+  } else if (sub === 'set') {
+    const verdict = args[2]
+    const headSha = args[3]
+    if (!verdict || !headSha) { console.error('usage: approval set <verdict> <headSha> [pr]'); process.exit(1) }
+    const pr = args[4] || entry.approval?.pr || null
+    chats.chats[key] = { ...entry, approval: { verdict, headSha, pr, reviewedAt: Date.now() } }
+    saveChats(chats)
+    console.log(JSON.stringify({ key, approval: chats.chats[key].approval }))
+  } else if (sub === 'clear') {
+    delete entry.approval
+    chats.chats[key] = entry
+    saveChats(chats)
+    console.log(`cleared approval for ${key}`)
+  } else {
+    console.error('usage: approval get|set <verdict> <headSha> [pr]|clear')
+    process.exit(1)
+  }
+}
+
 async function doProject() {
   const sub = args[1] || 'list'
   const repo = repoName()
@@ -649,10 +716,22 @@ async function doProject() {
   }
 }
 
-if (mode === 'login') { await doLogin() }
-else if (mode === 'ask') { await doAsk() }
-else if (mode === 'status') { await doStatus() }
+function withLock(fn) {
+  return async () => {
+    acquireLock()
+    try {
+      await fn()
+    } finally {
+      releaseLock()
+    }
+  }
+}
+
+if (mode === 'login') { await withLock(doLogin)() }
+else if (mode === 'ask') { await withLock(doAsk)() }
+else if (mode === 'status') { await withLock(doStatus)() }
 else if (mode === 'chats') { await doChats() }
-else if (mode === 'reset') { await doReset() }
-else if (mode === 'project' || mode === 'projects') { await doProject() }
+else if (mode === 'reset') { await withLock(doReset)() }
+else if (mode === 'approval') { await withLock(doApproval)() }
+else if (mode === 'project' || mode === 'projects') { await withLock(doProject)() }
 else { usage(); process.exit(1) }
