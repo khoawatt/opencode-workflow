@@ -1,0 +1,11 @@
+# Never commit these — they contain session cookies, personal state, and deps.
+profile/
+node_modules/
+libs/
+chats.json
+projects.json
+autoreview.json
+
+# OS / editor
+.DS_Store
+*.log

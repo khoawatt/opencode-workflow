@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Toggle ChatGPT auto-review state for opencode.
+# Writes ~/.config/opencode/chatgpt-bridge/autoreview.json
+
+STATE="$HOME/.config/opencode/chatgpt-bridge/autoreview.json"
+
+cmd="${1:-status}"
+
+case "$cmd" in
+  on)
+    printf '{"enabled": true}\n' > "$STATE"
+    echo "auto-review: ON"
+    ;;
+  off)
+    printf '{"enabled": false}\n' > "$STATE"
+    echo "auto-review: OFF"
+    ;;
+  status)
+    if [ -f "$STATE" ]; then
+      if grep -q '"enabled": true' "$STATE"; then
+        echo "auto-review: ON"
+      else
+        echo "auto-review: OFF"
+      fi
+    else
+      echo "auto-review: OFF"
+    fi
+    ;;
+  *)
+    echo "usage: autoreview on|off|status"
+    exit 1
+    ;;
+esac
