@@ -1,17 +1,45 @@
-# ChatGPT Review Bridge for OpenCode
+# OpenCode Workflow
 
-Tự động gửi **kết quả tổng kết task** của agent (text summary "Done / What changed
-/ Verification") lên **ChatGPT Plus (web)** như một **reviewer độc lập, workflow-aware**:
-bọc kết quả trong một envelope ngữ cảnh nhỏ gọn (MODE / GOAL / CURRENT_STAGE /
-REQUESTED_DECISION / AUTHORITY) và đọc về **verdict machine-actionable** giúp tiến
-workflow — không cần copy-paste, không gửi raw git diff.
+Bộ quy trình chuẩn cho OpenCode ↔ ChatGPT Web collaboration, gồm:
 
-Sử dụng Playwright + Chrome (profile đăng nhập sẵn) làm cầu nối. Không tốn quota
-API: review chạy trên tài khoản ChatGPT Plus bản web của bạn.
+1. **Review bridge** — gửi **kết quả tổng kết task** (text summary "Done / What
+   changed / Verification") lên **ChatGPT Plus (web)** như một **reviewer độc lập,
+   workflow-aware**, đọc về **verdict machine-actionable** giúp tiến workflow.
+2. **Policy + config chuẩn** — `opencode.jsonc` (Superpowers + permission policy),
+   `AGENTS.md` collaboration, `@vision`, merge wrapper an toàn.
+3. **`opencode-work`** — tmux launcher chạy nhiều repo song song (2 pane).
+
+Không cần copy-paste, không gửi raw git diff, không tốn quota API: review chạy
+trên tài khoản ChatGPT Plus bản web của bạn (Playwright + Chrome).
 
 ---
 
-## Tính năng
+## Tài liệu
+
+| File | Nội dung |
+|---|---|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Kiến trúc + execution contract (phân quyền, policy, PR contract) |
+| [`docs/WORKFLOW.md`](docs/WORKFLOW.md) | Review workflow: envelope, state machine, chống loop |
+| [`docs/SETUP.md`](docs/SETUP.md) | Cài máy mới / onboarding team + `opencode-work` |
+
+---
+
+## Cài đặt nhanh
+
+```bash
+git clone https://github.com/Akbi47/opencode-workflow.git
+cd opencode-workflow
+bash install.sh                                   # cài bridge global
+~/.config/opencode/chatgpt-bridge/bin/chatgpt-review login    # đăng nhập ChatGPT (1 lần)
+bash install-project.sh /path/to/your/repo        # cài policy + .opencode vào repo
+cp bin/opencode-work ~/.local/bin/ && chmod +x ~/.local/bin/opencode-work   # tmux launcher
+```
+
+Chi tiết: [`docs/SETUP.md`](docs/SETUP.md).
+
+---
+
+## Tính năng (review bridge)
 
 - Gọi tay: `@chatgpt-review` từ session opencode.
 - Auto-review: sau mỗi task có thay đổi code, agent tự gửi **text summary kết quả**
@@ -34,8 +62,8 @@ API: review chạy trên tài khoản ChatGPT Plus bản web của bạn.
 ### Nhanh nhất — chạy 1 lệnh (tự động hoàn toàn)
 
 ```bash
-git clone https://github.com/Akbi47/opencode-chatgpt-review.git
-cd opencode-chatgpt-review
+git clone https://github.com/Akbi47/opencode-workflow.git
+cd opencode-workflow
 bash install.sh
 ```
 
@@ -242,27 +270,36 @@ Lệnh CLI tương đương: `.../chatgpt-review project list|create|attach|deta
 ## Cấu trúc thư mục
 
 ```
-install.sh                    # setup tự động (config + npm + chromium + system libs)
-AGENTS.md                     # runbook cho agent tự setup trên máy mới
-bin/chatgpt-review.mjs       # script bridge chính (Playwright)
-bin/chatgpt-review           # wrapper bash
-bin/autoreview               # toggle auto-review state
-agent/chatgpt-review.md      # subagent opencode (read-only, gọi bridge)
-skill/chatgpt-review/        # skill hướng dẫn agent dùng bridge
-command/*.md                 # lệnh /autoreview /chatgpt-new /chatgpt-project
-plugin/chatgpt-autoreview.ts # plugin: chèn chỉ dẫn auto-review + env
-package.json                 # dependency: playwright
-bridge-config.json           # cấu hình ngưỡng + chế độ project
+README.md                      # tổng quan
+docs/ARCHITECTURE.md           # kiến trúc + execution contract (phân quyền, policy)
+docs/WORKFLOW.md               # review workflow: envelope, state machine, anti-loop
+docs/SETUP.md                  # cài máy mới + opencode-work
+install.sh                     # setup global bridge (config + npm + chromium + libs)
+install-project.sh             # cài policy + .opencode vào 1 repo (merge, không ghi đè)
+bin/chatgpt-review.mjs         # script bridge chính (Playwright, có lock + approval)
+bin/chatgpt-review             # wrapper bash
+bin/autoreview                 # toggle auto-review state
+bin/opencode-work              # tmux launcher chạy nhiều repo song song
+agent/chatgpt-review.md        # subagent dispatcher (workflow-aware, heredoc stdin)
+skill/chatgpt-review/          # skill hướng dẫn
+command/*.md                   # /autoreview /chatgpt-new /chatgpt-project
+plugin/chatgpt-autoreview.ts   # plugin: chèn chỉ dẫn auto-review + env
+templates/opencode.jsonc       # policy chuẩn (Superpowers + permission)
+templates/AGENTS.collaboration.md  # mục collaboration chuẩn
+templates/vision.md            # subagent @vision
+templates/merge-approved-pr.sh # merge wrapper an toàn (ChatGPT approval + HEAD + CI)
+package.json                   # dependency: playwright
+bridge-config.json             # cấu hình ngưỡng + chế độ project
 ```
 
 ## Đổi máy — checklist
 
-1. Clone repo này: `git clone https://github.com/Akbi47/opencode-chatgpt-review.git`
+1. Clone repo: `git clone https://github.com/Akbi47/opencode-workflow.git`
 2. `bash install.sh`
 3. `.../chatgpt-review login` → đăng nhập ChatGPT → chờ "LOGIN OK"
 4. `.../chatgpt-review status` → `loggedIn: true`
-5. Restart opencode → `@chatgpt-review` dùng được ngay.
+5. `bash install-project.sh <repo>` cho từng repo
+6. `cp bin/opencode-work ~/.local/bin/` (tmux launcher)
+7. Restart opencode → `@chatgpt-review` dùng được ngay.
 
-Hoặc đơn giản hơn: đưa repo (hoặc URL repo) cho bất kỳ agent nào kèm prompt
-trong mục **Giao cho agent khác tự setup** ở trên — agent tự chạy mọi bước theo
-`AGENTS.md`.
+Hoặc đưa repo cho bất kỳ agent nào kèm `AGENTS.md` — agent tự chạy mọi bước theo runbook.

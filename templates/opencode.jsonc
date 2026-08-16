@@ -1,0 +1,84 @@
+{
+  // OpenCode project configuration for this repository.
+  // Loaded when opencode starts in this directory; restart opencode after changes.
+  "$schema": "https://opencode.ai/config.json",
+
+  // Enable Superpowers project-specifically (official OpenCode plugin install).
+  // See https://github.com/obra/superpowers (docs/README.opencode.md).
+  "plugin": ["superpowers@git+https://github.com/obra/superpowers.git"],
+
+  // Approved safe Git/GitHub permission policy.
+  //
+  // - Safe repository inspection, staging, and commits run without confirmation.
+  // - Mutating Git/GitHub operations require confirmation (ask).
+  // - No operation is hard-denied by default: historically destructive
+  //   operations (reset/clean/restore/checkout/force-push/raw merge) prompt for
+  //   confirmation (ask) instead of being blocked outright.
+  //
+  // opencode evaluates bash rules by pattern match with the LAST matching rule
+  // winning, so the catch-all "*" comes first and the narrow rules come last.
+  // Merge is permitted through the dedicated safety-checked wrapper script
+  // (`.opencode/scripts/merge-approved-pr.sh`) — the preferred, allowlisted path
+  // — which verifies PR state, HEAD match, a recorded ChatGPT approval, and green
+  // checks. The raw `gh pr merge` command remains an `ask` path that prompts for
+  // confirmation rather than being denied.
+  "permission": {
+    "bash": {
+      "*": "ask",
+      // Safe repository inspection
+      "git status*": "allow",
+      "git diff*": "allow",
+      "git log*": "allow",
+      "git show*": "allow",
+      "git branch*": "allow",
+      "git remote*": "allow",
+      "git rev-parse*": "allow",
+      "git ls-files*": "allow",
+      "git fetch*": "allow",
+      "git grep*": "allow",
+      // Normal intentional development: staging and commits
+      "git add*": "allow",
+      "git commit*": "allow",
+      // GitHub Issue/PR inspection
+      "gh issue view*": "allow",
+      "gh issue list*": "allow",
+      "gh pr view*": "allow",
+      "gh pr list*": "allow",
+      "gh pr checks*": "allow",
+      "gh repo view*": "allow",
+      "gh auth status*": "allow",
+      // Mutating Git/GitHub operations require confirmation
+      "git commit --amend*": "ask",
+      "git pull*": "ask",
+      "git push*": "ask",
+      "git merge*": "ask",
+      "git rebase*": "ask",
+      "git switch*": "ask",
+      "git stash*": "ask",
+      "gh issue create*": "ask",
+      "gh issue edit*": "ask",
+      "gh pr create*": "ask",
+      "gh pr edit*": "ask",
+      "gh pr comment*": "ask",
+      "gh pr review*": "ask",
+      // The dedicated safety-checked wrapper script is allowlisted; it takes no
+      // arguments, so no trailing wildcard is needed.
+      ".opencode/scripts/merge-approved-pr.sh": "allow",
+      // Historically destructive Git/GitHub operations prompt for confirmation
+      // (ask) instead of being hard-denied. Rules are ordered so the more
+      // specific force-push and wrapper paths win over the broader patterns.
+      // In normal interactive mode these are never executed without explicit
+      // human confirmation. NOTE: when running with --auto (the opencode-work
+      // launcher defaults to it), `ask`-tier operations are auto-approved
+      // without a human prompt; only a `deny` rule would remain gated.
+      "git reset*": "ask",
+      "git clean*": "ask",
+      "git restore*": "ask",
+      "git checkout*": "ask",
+      "git push --force*": "ask",
+      "git push -f*": "ask",
+      "git push --force-with-lease*": "ask",
+      "gh pr merge*": "ask",
+    },
+  },
+}

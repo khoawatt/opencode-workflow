@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SESSION="opencode-work"
+
+FEAON="$HOME/projects/personal/Feaon-ldp-v2"
+PORTFOLIO="$HOME/projects/personal/qvak-portfolio"
+
+# Dedicated local workspace: mặc định auto-approve các permission ở trạng thái ask.
+# Muốn quay về chế độ hỏi permission: OPENCODE_WORK_AUTO=0 opencode-work --reset
+OPENCODE_WORK_AUTO="${OPENCODE_WORK_AUTO:-1}"
+
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
+
+die() {
+    printf 'opencode-work: %s\n' "$*" >&2
+    exit 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || die "Không tìm thấy command '$1' trong PATH."
+}
+
+require_directory() {
+    [[ -d "$1" ]] || die "Không tìm thấy project directory: $1"
+}
+
+attach_workspace() {
+    if [[ -n "${TMUX:-}" ]]; then
+        exec tmux switch-client -t "$SESSION"
+    else
+        exec tmux attach-session -t "$SESSION"
+    fi
+}
+
+session_is_valid() {
+    local pane_count
+    pane_count="$(tmux list-panes -t "$SESSION" -F '#{pane_id}' | wc -l | tr -d ' ')"
+    [[ "$pane_count" -eq 2 ]] || return 1
+
+    local paths
+    paths="$(tmux list-panes -t "$SESSION" -F '#{pane_current_path}')"
+
+    grep -Fxq "$FEAON" <<<"$paths" || return 1
+    grep -Fxq "$PORTFOLIO" <<<"$paths" || return 1
+}
+
+# ------------------------------------------------------------
+# Validate environment
+# ------------------------------------------------------------
+
+require_command tmux
+require_command opencode
+require_directory "$FEAON"
+require_directory "$PORTFOLIO"
+
+case "$OPENCODE_WORK_AUTO" in
+    0|1) ;;
+    *) die "OPENCODE_WORK_AUTO chỉ nhận 0 hoặc 1." ;;
+esac
+
+OPENCODE_BIN="$(command -v opencode)"
+
+# ------------------------------------------------------------
+# Arguments
+# ------------------------------------------------------------
+
+if [[ $# -gt 1 ]]; then
+    die "Dùng: opencode-work [--reset]"
+fi
+
+if [[ "${1:-}" == "--reset" ]]; then
+    if tmux has-session -t "$SESSION" 2>/dev/null; then
+        tmux kill-session -t "$SESSION"
+    fi
+elif [[ $# -eq 1 ]]; then
+    die "Tham số không hợp lệ: $1. Dùng: opencode-work [--reset]"
+fi
+
+# ------------------------------------------------------------
+# Reuse existing valid workspace
+# ------------------------------------------------------------
+
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+    if session_is_valid; then
+        attach_workspace
+    fi
+
+    die "Session '$SESSION' đang tồn tại nhưng không đúng workspace Feaon + Portfolio. Chạy: opencode-work --reset"
+fi
+
+# ------------------------------------------------------------
+# Create workspace
+# ------------------------------------------------------------
+
+cleanup_failed_create() {
+    local exit_code=$?
+    trap - ERR
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+    exit "$exit_code"
+}
+trap cleanup_failed_create ERR
+
+# Tạo pane Feaon và lấy pane_id thật từ tmux.
+# Không hard-code :0.0 / :0.1 nên không phụ thuộc base-index.
+FEAON_PANE="$(
+    tmux new-session \
+        -d \
+        -s "$SESSION" \
+        -c "$FEAON" \
+        -P \
+        -F '#{pane_id}'
+)"
+
+# Tạo pane Portfolio bên phải và lấy pane_id thật.
+PORTFOLIO_PANE="$(
+    tmux split-window \
+        -h \
+        -t "$FEAON_PANE" \
+        -c "$PORTFOLIO" \
+        -P \
+        -F '#{pane_id}'
+)"
+
+# Chia đều hai pane.
+tmux select-layout -t "$SESSION" even-horizontal >/dev/null
+
+# Chạy OpenCode với project path tường minh.
+# Điều này buộc OpenCode nhận đúng working directory của từng repo.
+if [[ "$OPENCODE_WORK_AUTO" == "1" ]]; then
+    FEAON_CMD="$(printf '%q ' "$OPENCODE_BIN" --auto "$FEAON")"
+    PORTFOLIO_CMD="$(printf '%q ' "$OPENCODE_BIN" --auto "$PORTFOLIO")"
+else
+    FEAON_CMD="$(printf '%q ' "$OPENCODE_BIN" "$FEAON")"
+    PORTFOLIO_CMD="$(printf '%q ' "$OPENCODE_BIN" "$PORTFOLIO")"
+fi
+
+tmux send-keys -t "$FEAON_PANE" "$FEAON_CMD" C-m
+tmux send-keys -t "$PORTFOLIO_PANE" "$PORTFOLIO_CMD" C-m
+
+# Focus Feaon khi mở lần đầu.
+tmux select-pane -t "$FEAON_PANE"
+
+trap - ERR
+attach_workspace
