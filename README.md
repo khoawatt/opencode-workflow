@@ -339,3 +339,28 @@ bridge-config.json             # cấu hình ngưỡng + chế độ project
 8. Restart opencode → `@chatgpt-review` / `@gemini-review` dùng được ngay.
 
 Hoặc đưa repo cho bất kỳ agent nào kèm `AGENTS.md` — agent tự chạy mọi bước theo runbook.
+
+---
+
+## Đóng góp (Contributing)
+
+Mọi đóng góp đều được hoan nghênh. Vui lòng xem [CONTRIBUTING.md](CONTRIBUTING.md) và [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) trước khi tạo pull request.
+
+---
+
+## Tác giả & Contributors
+
+* **Quách Võ Anh Khoa** ([@khoawatt](https://github.com/khoawatt)) — Author & Maintainer
+* **Audition MLD** ([@audition-mld](https://github.com/audition-mld)) — Contributor
+
+---
+
+## Giấy phép (License)
+
+Dự án được phân phối dưới giấy phép **MIT License**. Xem chi tiết tại [LICENSE](LICENSE).
+
+---
+
+## Bảo mật (Security)
+
+Vui lòng xem [SECURITY.md](SECURITY.md) để báo cáo lỗ hổng bảo mật. Không mở issue công khai cho vấn đề bảo mật.

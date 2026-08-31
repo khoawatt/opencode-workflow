@@ -1,15 +1,26 @@
 {
-  "name": "chatgpt-bridge",
+  "name": "opencode-workflow",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "description": "ChatGPT Plus review bridge for opencode — Playwright bridge to send diffs/plans to ChatGPT web and read the verdict back, with per-repo chat reuse and Projects support",
+  "main": "bin/chatgpt-review.mjs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/khoawatt/opencode-workflow.git"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "opencode",
+    "chatgpt",
+    "gemini",
+    "ai-agent",
+    "code-review",
+    "playwright"
+  ],
+  "author": "Quách Võ Anh Khoa <khoawatt>",
+  "license": "MIT",
   "type": "commonjs",
+  "scripts": {
+    "test": "bash tests/test.sh"
+  },
   "dependencies": {
     "playwright": "^1.62.1"
   }
