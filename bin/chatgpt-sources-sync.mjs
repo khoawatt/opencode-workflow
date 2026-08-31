@@ -333,23 +333,26 @@ print(f"Built {zip_path} total {len(list(zipfile.ZipFile(zip_path).infolist()))}
   console.error(`[build] sha256 ${sha}`)
   scanZipForSecrets(zipPath)
   console.error(`[build] secret scan PASS`)
-  // Update state.json atomically (keep .git hybrid)
+  // Update state.json atomically (keep .git hybrid, retention 1 - only keep current)
   let state=loadJson(STATE_FILE, {schemaVersion:1, projects:{}})
   const key = `${ctx.name}:${branch}`
   if(!state.projects[key]) state.projects[key] = {projectUrl:null, current:null, previous:null}
-  const prev = state.projects[key].current
   const now = new Date().toISOString()
-  state.projects[key].previous = prev
+  // retention 1: don't keep previous, just overwrite current and clear previous
+  state.projects[key].previous = null
   state.projects[key].current = {artifact: zipName, hash: zipName.replace('.zip',''), headSha, shortSha, sentinel, size: sz, sha256: sha, createdAt: now, uploadedAt:null, remoteSourceId:null, remoteName:null, status:'local-only-hybrid', hybrid:true}
   saveJsonAtomic(STATE_FILE, state)
-  // Also update legacy tracking-last-version.json for compatibility
+  // Also update legacy tracking-last-version.json for compatibility (retention 1)
   try{
     const legacyPath = join(ctx.root,'tracking-last-version.json')
     let legacy=loadJson(legacyPath, {schemaVersion:1, lastTwo:[], history:[]})
     legacy.current=zipName
-    legacy.previous=prev ? prev.artifact : null
-    legacy.lastTwo=[zipName, ...(prev? [prev.artifact]:[])].slice(0,2)
+    legacy.previous=null
+    legacy.lastTwo=[zipName]
+    legacy.retention={local:1, remote:1}
     legacy.history.push({artifact:zipName, headSha, shortSha, sentinel, size:sz, createdAt:now, hybrid:true})
+    // keep only last 5 history entries
+    if(legacy.history.length>5) legacy.history=legacy.history.slice(-5)
     saveJsonAtomic(legacyPath, legacy)
   }catch{}
   console.log(JSON.stringify({built: zipName, sentinel, sha256: sha, size: sz, hybrid:true},null,2))
@@ -685,17 +688,15 @@ async function doDelete(){
   const ctx=repoContext()
   let toDelete = target
   if(!toDelete){
-    // Default: delete oldest local zip beyond retention (keep 2 latest)
+    // Default: delete oldest local zip beyond retention 1 (keep only current)
     const state=loadJson(STATE_FILE,null)
     if(state){
       const key=Object.keys(state.projects)[0]
-      const prev = state.projects[key].previous
-      // If we have 3 local files, the oldest is the one not in current/previous
       const files = readdirSync(ctx.root).filter(f=>f.endsWith('.zip')).sort()
-      const keep = new Set([state.projects[key].current?.artifact, prev?.artifact].filter(Boolean))
+      const keep = new Set([state.projects[key].current?.artifact].filter(Boolean))
       const candidates = files.filter(f=>!keep.has(f))
       if(candidates.length>0) toDelete = candidates[0]
-      else throw new Error('No file to delete (all local files are current/previous)')
+      else throw new Error('No file to delete (all local files are current)')
     }
   }
   if(!toDelete) throw new Error('No target file specified')
@@ -752,16 +753,15 @@ async function doDelete(){
     localOk=true
   }
 
-  // Update state if needed (if deleted file was tracked)
+  // Update state if needed (retention 1: current only, so previous already null)
   try{
     const state=loadJson(STATE_FILE,null)
     if(state){
       const key=Object.keys(state.projects)[0]
-      // If we deleted the previous, clear it
-      if(state.projects[key].previous?.artifact === toDelete){
-        state.projects[key].previous = null
+      if(state.projects[key].current?.artifact === toDelete){
+        state.projects[key].current = null
         saveJsonAtomic(STATE_FILE, state)
-        console.error(`[delete] cleared previous in state.json`)
+        console.error(`[delete] cleared current in state.json (was deleted)`)
       }
     }
   }catch{}
@@ -823,12 +823,12 @@ PROMPT`, {encoding:'utf8', shell:'/bin/bash', timeout:120000})
   state.projects[key].current.status='verified'
   state.projects[key].current.verifiedAt=new Date().toISOString()
   saveJsonAtomic(STATE_FILE, state)
-  // Clean oldest local (beyond retention 2)
+  // Clean oldest local (retention 1: keep only current)
   const files = readdirSync(ctx.root).filter(f=>f.endsWith('.zip')).sort()
-  const keep = new Set([state.projects[key].current?.artifact, state.projects[key].previous?.artifact].filter(Boolean))
+  const keep = new Set([state.projects[key].current?.artifact].filter(Boolean))
   const toDeleteLocal = files.filter(f=>!keep.has(f))
   for(const f of toDeleteLocal){
-    try{ unlinkSync(join(ctx.root,f)); console.error(`[sync] cleaned old local ${f}`)}catch{}
+    try{ unlinkSync(join(ctx.root,f)); console.error(`[sync] cleaned old local ${f} (retention 1)`)}catch{}
   }
   console.log(JSON.stringify({synced: cur.artifact, sentinel, verified: verifyOk},null,2))
 }
