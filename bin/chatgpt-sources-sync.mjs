@@ -237,17 +237,22 @@ USAGE:
   chatgpt-sources-sync.mjs status                      Show local state + project + zips
   chatgpt-sources-sync.mjs build [--sentinel=STR]      Build new ZIP (hybrid .git + metadata, respects .gitignore)
   chatgpt-sources-sync.mjs upload [--file=PATH] [--headless] [--timeout=SECONDS]
+  chatgpt-sources-sync.mjs delete [--file=NAME]        Delete one file (local+remote)
+  chatgpt-sources-sync.mjs reset [--yes]               Delete ALL local zips + ALL remote Sources + clear state (for privacy)
+  chatgpt-sources-sync.mjs sync                        Full: build (if needed) + upload + verify + clean old (retention 2)
   chatgpt-sources-sync.mjs list                        (alias for status)
 
 OPTIONS:
-  --file=PATH      ZIP to upload (default: current from .chatgpt-sources/state.json)
+  --file=PATH      ZIP to upload/delete (default: current from state)
   --timeout=SECONDS wait for upload (default 180)
   --headless       try headless (may be blocked by Cloudflare)
   --headful        default
+  --yes            skip confirm for reset
 
-Hybrid mode: ZIP keeps .git (source of truth) + .chatgpt-review-metadata/ (HEAD, log, diff, manifest) for efficient retrieval. Secret scan + size gate are fail-closed before upload.
+Hybrid mode: ZIP keeps .git (source of truth) + .chatgpt-review-metadata/ for efficient retrieval. Secret scan + size gate fail-closed.
 State is canonical at .chatgpt-sources/state.json (atomic). Global lock at ~/.config/opencode/chatgpt-bridge/.lock is reused.
-  `)
+Reset clears both local and GPT web so next sync auto re-creates.
+`)
 }
 async function doStatus(){
   const ctx=repoContext()
@@ -821,6 +826,123 @@ PROMPT`, {encoding:'utf8', shell:'/bin/bash', timeout:120000})
   console.log(JSON.stringify({synced: cur.artifact, sentinel, verified: verifyOk},null,2))
 }
 
+async function doReset(){
+  let headful=true, yes=false
+  for(const a of process.argv.slice(3)){
+    if(a==='--headless') headful=false
+    else if(a==='--headful') headful=true
+    else if(a==='--yes' || a==='-y') yes=true
+  }
+  const ctx=repoContext()
+  if(!yes){
+    console.error(`[reset] This will DELETE:`)
+    try{
+      const files=readdirSync(ctx.root).filter(f=>f.endsWith('.zip'))
+      console.error(`  local zips (${files.length}): ${files.join(', ') || '(none)'}`)
+    }catch{}
+    console.error(`  remote Sources in project auto-zip (all files)`)
+    console.error(`  local state: .chatgpt-sources/state.json + tracking-last-version.json`)
+    console.error(`[reset] Run with --yes to confirm`)
+    process.exit(1)
+  }
+  // 1) Delete ALL remote Sources via Playwright
+  console.error(`[reset] deleting ALL remote Sources...`)
+  const projects=loadJson(PROJECTS_FILE,{projects:{}})
+  let project = projects.projects[ctx.name]
+  if(project){
+    const ctxP = await launchPersistent(headful)
+    const page = ctxP.pages()[0] || await ctxP.newPage()
+    try{
+      await page.goto('https://chatgpt.com/',{waitUntil:'domcontentloaded',timeout:60000})
+      await handleCloudflare(page)
+      let logged=false
+      for(let i=0;i<15;i++){ if(await isLoggedIn(page)){logged=true;break} await new Promise(r=>setTimeout(r,2000)) }
+      if(!logged) throw new Error('ChatGPT not signed in')
+      const ok = await gotoProject(page, project)
+      if(!ok) console.error(`[reset] project navigation warning`)
+      const tab = await findSourcesTab(page)
+      if(!tab) throw new Error('Sources tab not found')
+      await tab.click({force:true})
+      await new Promise(r=>setTimeout(r,2500))
+      // Enumerate all file rows and delete one by one
+      let deletedCount=0
+      while(true){
+        const panel = page.getByRole('tabpanel')
+        const rows = await panel.locator('div.group\\/file-row').all()
+        if(rows.length===0){ console.error(`[reset] no more remote files`); break }
+        // Get first row's file name
+        let firstName=null
+        try{
+          const trunc = await rows[0].locator('.truncate').first().innerText().catch(()=> '')
+          firstName = trunc.trim()
+        }catch{}
+        if(!firstName){
+          try{
+            const txt = await rows[0].innerText()
+            const m=txt.match(/opencode-workflow[^\n]*\.zip/)
+            if(m) firstName=m[0]
+          }catch{}
+        }
+        if(!firstName) firstName = `row0`
+        console.error(`[reset] deleting remote file ${deletedCount+1}/${rows.length}: ${firstName}`)
+        const actionsBtn = rows[0].locator('button[aria-label="Source actions"], button[aria-haspopup="menu"]').first()
+        if(!(await actionsBtn.count())){ console.error(`[reset] actions button not found`); break }
+        await actionsBtn.click({force:true})
+        await new Promise(r=>setTimeout(r,1000))
+        const delBtn = page.getByRole('menuitem', {name: /Delete/i}).first()
+        let delFound=false
+        if(await delBtn.count() && await delBtn.isVisible().catch(()=>false)){
+          await delBtn.click({force:true})
+          delFound=true
+        } else {
+          const alt = page.locator('text=Delete').first()
+          if(await alt.count()){ await alt.click({force:true}); delFound=true }
+        }
+        if(!delFound){ console.error(`[reset] Delete menuitem not found`); break }
+        await new Promise(r=>setTimeout(r,1000))
+        // Confirm
+        const confirmBtn = page.getByRole('button', {name: /Delete/i}).first()
+        if(await confirmBtn.count() && await confirmBtn.isVisible().catch(()=>false)){
+          await confirmBtn.click({force:true})
+          await new Promise(r=>setTimeout(r,1500))
+        }
+        await new Promise(r=>setTimeout(r,1500))
+        deletedCount++
+        if(deletedCount>20){ console.error(`[reset] too many deletions, abort`); break }
+      }
+      console.error(`[reset] remote delete done, deleted ${deletedCount} files`)
+      await page.screenshot({path:'/tmp/reset-remote.png', fullPage:true}).catch(()=>{})
+    } finally {
+      await ctxP.close()
+    }
+  } else {
+    console.error(`[reset] no project attached, skipping remote delete`)
+  }
+  // 2) Delete ALL local zips
+  try{
+    const files=readdirSync(ctx.root).filter(f=>f.endsWith('.zip') || f.endsWith('.md') && f.startsWith('opencode-workflow_'))
+    for(const f of files){
+      try{ unlinkSync(join(ctx.root,f)); console.error(`[reset] deleted local ${f}`)}catch(e){ console.error(`[reset] failed to delete ${f}: ${e.message}`)}
+    }
+  }catch{}
+  // 3) Clear state
+  try{
+    const statePath = STATE_FILE
+    if(existsSync(statePath)) { unlinkSync(statePath); console.error(`[reset] deleted ${statePath}`)}
+    // Also try to remove dir if empty
+    try{ const dirFiles=readdirSync(STATE_DIR); if(dirFiles.length===0) { const { rmdirSync } = await import('node:fs'); rmdirSync(STATE_DIR) } }catch{}
+  }catch{}
+  try{
+    const legacyPath = join(ctx.root,'tracking-last-version.json')
+    if(existsSync(legacyPath)) { unlinkSync(legacyPath); console.error(`[reset] deleted ${legacyPath}`)}
+  }catch{}
+  try{
+    const altPath = join(ctx.root,'.sources-tracking.json')
+    if(existsSync(altPath)) unlinkSync(altPath)
+  }catch{}
+  console.log(JSON.stringify({reset: true, note: 'Local and remote Sources cleared. Next sync will auto rebuild and upload.'},null,2))
+}
+
 const cmd = process.argv[2]
 if(!cmd || cmd==='help' || cmd==='--help'){ usage(); process.exit(0) }
 if(cmd==='status' || cmd==='list'){ await doStatus() }
@@ -835,6 +957,10 @@ else if(cmd==='upload'){
 else if(cmd==='delete' || cmd==='clean'){
   acquireLock(300)
   try{ await doDelete() } finally{ releaseLock() }
+}
+else if(cmd==='reset'){
+  acquireLock(300)
+  try{ await doReset() } finally{ releaseLock() }
 }
 else if(cmd==='sync'){
   acquireLock(300)
