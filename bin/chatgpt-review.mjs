@@ -89,11 +89,11 @@ const CREATE_PROJECT_BTN_SELECTORS = [
 
 function usage() {
   console.error(`
-chatgpt-review bridge - sends a prompt to ChatGPT Plus (web) and reads the reply.
+ chatgpt-review bridge - sends a prompt to ChatGPT Plus (web) and reads the reply.
 Reuses one conversation per repo+branch; creates a new one when the context gets long.
 
 USAGE:
-  chatgpt-review.mjs login          Open a visible browser so you can sign in to ChatGPT once.
+  chatgpt-review.mjs login [--switch] [--wait=SECONDS]   Open a visible browser so you can sign in to ChatGPT once.
   chatgpt-review.mjs ask            Read prompt from stdin (or --file=FILE), send to ChatGPT, print reply.
   chatgpt-review.mjs status         Check whether a signed-in profile exists.
   chatgpt-review.mjs chats          List per-repo conversation state.
@@ -101,6 +101,11 @@ USAGE:
   chatgpt-review.mjs approval       Get/set/clear the review approval state (get|set <verdict> <sha>|clear).
   chatgpt-review.mjs project        Manage ChatGPT Projects (create/list/attach/detach/resolve).
   chatgpt-review.mjs projects       Alias for "project list".
+
+LOGIN OPTIONS:
+  --switch              Keep browser open to switch account (waits for session token to change; does not auto-close if already logged in).
+  --wait=SECONDS        After a new login is detected, keep browser open for SECONDS (default 0; implies --switch).
+  --keep-open / --stay-open   Alias for --switch.
 
 OPTIONS (for ask):
   --file=FILE        Read the prompt from FILE instead of stdin.
@@ -236,41 +241,80 @@ function projectUrl(project) {
 }
 
 async function listProjectsFromWeb(page) {
-  // The app itself calls this endpoint on load with the right auth headers.
-  // Capture the in-page response instead of re-fetching (avoids rebuilding auth).
-  const promise = new Promise((resolve) => {
-    const handler = async (r) => {
-      const u = r.url()
-      if (u.includes('/backend-api/gizmos/snorlax/sidebar')) {
-        try {
-          const j = await r.json()
-          page.off('response', handler)
-          resolve(j)
-        } catch {}
-      }
+  // Prefer direct fetch (reliable, no race) — page has auth cookies
+  try {
+    const data = await page.evaluate(async () => {
+      const r = await fetch('/backend-api/gizmos/snorlax/sidebar?owned_only=true&conversations_per_gizmo=5&limit=20', {
+        credentials: 'include',
+      })
+      if (!r.ok) throw new Error('sidebar fetch ' + r.status)
+      return r.json()
+    })
+    if (data && Array.isArray(data.items)) {
+      const items = data.items
+        .map((i) => {
+          const g = i.gizmo && i.gizmo.gizmo
+          return {
+            id: g && g.id,
+            slug: g && g.short_url,
+            name: g && g.display && g.display.name,
+          }
+        })
+        .filter((p) => p.id)
+      return items
     }
-    page.on('response', handler)
-    setTimeout(() => { page.off('response', handler); resolve(null) }, 20000)
-  })
-  // Ensure the app has loaded the sidebar at least once.
+  } catch (e) {
+    console.error('[bridge] direct sidebar fetch failed:', e.message, '— falling back to response capture')
+  }
+
+  // Fallback: capture the in-page response (older method)
+  const captureOnce = () =>
+    new Promise((resolve) => {
+      const handler = async (r) => {
+        const u = r.url()
+        if (u.includes('/backend-api/gizmos/snorlax/sidebar')) {
+          try {
+            const j = await r.json()
+            page.off('response', handler)
+            resolve(j)
+          } catch {}
+        }
+      }
+      page.on('response', handler)
+      setTimeout(() => {
+        page.off('response', handler)
+        resolve(null)
+      }, 20000)
+    })
   if (!page.url().includes('chatgpt.com')) await page.goto(CHAT_URL, { waitUntil: 'domcontentloaded', timeout: 60000 })
-  const data = await promise
+  // First try: if a sidebar response is already in-flight, capture it
+  let data = await captureOnce()
   if (!data) {
-    // Trigger a fresh load so the app requests the sidebar again.
+    // Second try: start listening BEFORE navigating so we don't miss the request
+    const secondCapture = captureOnce()
     await page.goto(CHAT_URL, { waitUntil: 'domcontentloaded', timeout: 60000 })
     await handleCloudflare(page)
-    await sleep(4000)
-  }
-  const captured = await promise
-  if (!captured) throw new Error('could not fetch projects list from ChatGPT web')
-  const items = (captured.items || []).map(i => {
-    const g = i.gizmo && i.gizmo.gizmo
-    return {
-      id: g && g.id,
-      slug: g && g.short_url,
-      name: g && g.display && g.display.name,
+    // Give the app time to fire the request while listener is active
+    data = await secondCapture
+    if (!data) {
+      // Last resort: force reload
+      const thirdCapture = captureOnce()
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 })
+      await handleCloudflare(page)
+      data = await thirdCapture
     }
-  }).filter(p => p.id)
+  }
+  if (!data) throw new Error('could not fetch projects list from ChatGPT web')
+  const items = (data.items || [])
+    .map((i) => {
+      const g = i.gizmo && i.gizmo.gizmo
+      return {
+        id: g && g.id,
+        slug: g && g.short_url,
+        name: g && g.display && g.display.name,
+      }
+    })
+    .filter((p) => p.id)
   return items
 }
 
@@ -281,14 +325,52 @@ async function findProjectId(page, name) {
 }
 
 async function createProject(page, name) {
+  // Ensure sidebar is open — the New project button lives in the expanded sidebar header
+  // and the click is ignored when the sidebar is collapsed (repro: dbg3 vs dbg4).
+  try {
+    const openBtn = page.locator('button[aria-label="Open sidebar"]').first()
+    if (await openBtn.count()) {
+      const state = await page.locator('#stage-slideover-sidebar').getAttribute('data-state').catch(() => null)
+      // data-state="closed" means collapsed; click to expand
+      if (state === 'closed' || (await openBtn.isVisible().catch(() => false))) {
+        // Only click if the New project button is not yet visible/interactable
+        const newProjVisible = await page
+          .locator(NEW_PROJECT_BTN_SELECTORS.join(', '))
+          .first()
+          .isVisible()
+          .catch(() => false)
+        if (!newProjVisible) {
+          await openBtn.click({ force: true })
+          await page.waitForTimeout(1500)
+        } else if (state === 'closed') {
+          // Even if visible in DOM, the collapsed rail may intercept clicks — expand anyway
+          await openBtn.click({ force: true })
+          await page.waitForTimeout(1200)
+        }
+      }
+    }
+  } catch {}
+
   const btn = page.locator(NEW_PROJECT_BTN_SELECTORS.join(', ')).first()
   if (await btn.count()) {
     await btn.click({ force: true })
   } else {
     throw new Error('New project button not found')
   }
-  await page.waitForTimeout(1500)
-  const input = page.locator(PROJECT_NAME_INPUT).first()
+  // Wait for the create form to appear — ChatGPT animates the dialog
+  let input = null
+  for (let i = 0; i < 15; i++) {
+    input = page.locator(PROJECT_NAME_INPUT).first()
+    if (await input.count()) break
+    // Fallback: also check inside the dedicated form container
+    input = page.locator('[data-testid="create-new-project-form"] input').first()
+    if (await input.count()) break
+    await page.waitForTimeout(500)
+  }
+  input = page.locator(PROJECT_NAME_INPUT).first()
+  if (await input.count() === 0) {
+    input = page.locator('[data-testid="create-new-project-form"] input').first()
+  }
   if (!(await input.count())) throw new Error('project name input not found')
   await input.fill(String(name))
   await page.waitForTimeout(300)
@@ -458,19 +540,123 @@ async function waitForReply(page, timeoutSec) {
 // ---------- commands ----------
 
 async function doLogin() {
+  const loginArgs = args.slice(1)
+  const has = (flag) => loginArgs.includes(flag)
+  const waitArg = loginArgs.find((a) => a.startsWith('--wait='))
+  let keepOpenSec = 0
+  let switchMode = has('--switch') || has('--stay-open') || has('--keep-open') || !!waitArg
+  if (waitArg) {
+    const v = parseInt(waitArg.slice(7), 10)
+    if (!isNaN(v) && v >= 0) keepOpenSec = v
+  } else if (has('--wait') || has('--stay-open') || has('--keep-open')) {
+    keepOpenSec = 0
+  }
   const ctx = await launchPersistent(true)
-  const page = ctx.pages()[0] || await ctx.newPage()
+  const page = ctx.pages()[0] || (await ctx.newPage())
+  let browserClosed = false
+  ctx.on('close', () => {
+    browserClosed = true
+  })
+  // also watch page close (user closes window)
+  page.on('close', () => {
+    browserClosed = true
+  })
   await page.goto(CHAT_URL, { waitUntil: 'domcontentloaded', timeout: 60000 })
   await handleCloudflare(page)
   console.error('Browser opened. Sign in to ChatGPT in the window.')
-  console.error('Waiting for a real signed-in session cookie to appear...')
+  if (switchMode) {
+    console.error(
+      'Switch mode: browser will stay open. If already logged in, log out in the window and sign in with the new account.',
+    )
+    if (keepOpenSec > 0) {
+      console.error(`Waiting for a new session (up to 20 min), then keeping open ${keepOpenSec}s after login...`)
+    } else {
+      console.error('Waiting for a new session (up to 20 min)... Press Ctrl+C to abort, or close the window to finish.')
+    }
+  } else {
+    console.error('Waiting for a real signed-in session cookie to appear...')
+    console.error('Tip: to switch account, run:  chatgpt-review login --switch   (keeps browser open)')
+  }
+
+  // capture initial token to detect account change in switch mode
+  let initialToken = null
+  try {
+    const cookies = await page.context().cookies('https://chatgpt.com/')
+    const c = cookies.find((c) => c.name.startsWith('__Secure-next-auth.session-token'))
+    initialToken = c ? c.value : null
+  } catch {}
+  const initiallyLoggedIn = !!initialToken
+  if (switchMode && initiallyLoggedIn) {
+    console.error('[switch] already logged in — waiting for you to log out and log in with the other account...')
+  }
+
   for (let i = 0; i < 600; i++) {
-    try {
-      if (await isLoggedIn(page)) {
-        await sleep(2000)
-        console.error('LOGIN OK — session saved.')
-        await ctx.close()
+    if (browserClosed) {
+      console.error('Browser was closed by user.')
+      let tok = null
+      try {
+        const cookies = await page.context().cookies('https://chatgpt.com/')
+        const c = cookies.find((c) => c.name.startsWith('__Secure-next-auth.session-token'))
+        tok = c ? c.value : null
+      } catch {}
+      if (tok) {
+        console.error('LOGIN OK — session saved (browser closed).')
+        try {
+          await ctx.close()
+        } catch {}
         return
+      }
+      console.error('No session cookie found — session not saved.')
+      try {
+        await ctx.close()
+      } catch {}
+      process.exit(1)
+    }
+    try {
+      const cookies = await page.context().cookies('https://chatgpt.com/')
+      const c = cookies.find((c) => c.name.startsWith('__Secure-next-auth.session-token'))
+      const token = c ? c.value : null
+      const loggedIn = !!token
+      if (loggedIn) {
+        if (!switchMode) {
+          await sleep(2000)
+          console.error('LOGIN OK — session saved.')
+          await ctx.close()
+          return
+        }
+        // switch mode: require a new token if we started logged in
+        if (initiallyLoggedIn) {
+          if (token !== initialToken) {
+            console.error('New session detected — LOGIN OK.')
+            if (keepOpenSec > 0) {
+              console.error(`Keeping browser open for ${keepOpenSec}s so you can verify... (close window to finish early)`)
+              for (let w = 0; w < keepOpenSec; w++) {
+                if (browserClosed) break
+                await sleep(1000)
+              }
+            } else {
+              await sleep(2000)
+            }
+            console.error('LOGIN OK — session saved.')
+            await ctx.close()
+            return
+          }
+          // still same account — keep waiting
+        } else {
+          // started logged out — any login is success
+          if (keepOpenSec > 0) {
+            console.error(`Login detected — keeping browser open for ${keepOpenSec}s...`)
+            for (let w = 0; w < keepOpenSec; w++) {
+              if (browserClosed) break
+              await sleep(1000)
+            }
+          } else {
+            await sleep(2000)
+          }
+          console.error('LOGIN OK — session saved.')
+          await ctx.close()
+          return
+        }
       }
     } catch {}
     await sleep(2000)

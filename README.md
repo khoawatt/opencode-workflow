@@ -5,12 +5,14 @@ Bộ quy trình chuẩn cho OpenCode ↔ ChatGPT Web collaboration, gồm:
 1. **Review bridge** — gửi **kết quả tổng kết task** (text summary "Done / What
    changed / Verification") lên **ChatGPT Plus (web)** như một **reviewer độc lập,
    workflow-aware**, đọc về **verdict machine-actionable** giúp tiến workflow.
-2. **Policy + config chuẩn** — `opencode.jsonc` (Superpowers + permission policy),
+2. **Gemini bridge** — cùng cơ chế với **Google Gemini (web)**: reviewer thứ hai
+   để cross-check (`@gemini-review`), không ghi approval state chính thức.
+3. **Policy + config chuẩn** — `opencode.jsonc` (Superpowers + permission policy),
    `AGENTS.md` collaboration, `@vision`, merge wrapper an toàn.
-3. **`opencode-work`** — tmux launcher chạy nhiều repo song song (2 pane).
+4. **`opencode-work`** — tmux launcher chạy nhiều repo song song (2 pane).
 
 Không cần copy-paste, không gửi raw git diff, không tốn quota API: review chạy
-trên tài khoản ChatGPT Plus bản web của bạn (Playwright + Chrome).
+trên tài khoản ChatGPT Plus / Google của bạn (Playwright + Chrome).
 
 ---
 
@@ -29,8 +31,9 @@ trên tài khoản ChatGPT Plus bản web của bạn (Playwright + Chrome).
 ```bash
 git clone https://github.com/Akbi47/opencode-workflow.git
 cd opencode-workflow
-bash install.sh                                   # cài bridge global
+bash install.sh                                   # cài bridge global (ChatGPT + Gemini)
 ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review login    # đăng nhập ChatGPT (1 lần)
+~/.config/opencode/gemini-bridge/bin/gemini-review login      # (tùy chọn) đăng nhập Google cho Gemini
 bash install-project.sh /path/to/your/repo        # cài policy + .opencode vào repo
 cp bin/opencode-work ~/.local/bin/ && chmod +x ~/.local/bin/opencode-work   # tmux launcher
 ```
@@ -50,7 +53,10 @@ Chi tiết: [`docs/SETUP.md`](docs/SETUP.md).
   thì không review lại, chỉ báo "awaiting human merge".
 - **Reuse chat theo repo + branch**: mỗi repo+branch có 1 thread ChatGPT riêng, context tích lũy.
 - **ChatGPT Projects**: 1 project/repo, hưởng project memory + custom instructions.
-- **Concurrency-safe**: file lock serialize mọi lần chạy (1 Chrome profile dùng chung)
+- **Gemini bridge (ý kiến thứ hai)**: `@gemini-review` gửi cùng envelope lên
+  Google Gemini (web) để cross-check; verdict chỉ mang tính tham khảo, không ghi
+  vào approval state chính thức (vẫn là ChatGPT).
+- **Concurrency-safe**: file lock serialize mọi lần chạy (mỗi bridge 1 Chrome profile)
   → 2 repo chạy song song không đụng nhau; stale lock (PID chết) tự dọn.
 - Fallback an toàn: chat/project lưu bị hỏng → tự mở mới, không crash.
 - Headful (mặc định) để vượt Cloudflare; có thể thử `--headless`.
@@ -220,12 +226,37 @@ Lệnh CLI tương đương: `.../chatgpt-review project list|create|attach|deta
 
 ```text
 /chatgpt-new    # bắt đầu thread ChatGPT mới cho repo+branch hiện tại
+/gemini-new     # bắt đầu thread Gemini mới cho repo+branch hiện tại
 ```
 
 ```bash
 .../chatgpt-review chats    # xem mapping chat theo repo+branch
 .../chatgpt-review reset    # xóa mapping chat hiện tại
+~/.config/opencode/gemini-bridge/bin/gemini-review chats   # mapping của Gemini
+~/.config/opencode/gemini-bridge/bin/gemini-review reset   # xóa mapping Gemini
 ```
+
+### Gemini review (ý kiến thứ hai)
+
+Đăng nhập Google một lần:
+
+```bash
+~/.config/opencode/gemini-bridge/bin/gemini-review login    # đăng nhập Google account
+~/.config/opencode/gemini-bridge/bin/gemini-review status   # → "loggedIn": true
+```
+
+Gọi trong session opencode:
+
+```
+@gemini-review cross-check kết quả task vừa review bằng ChatGPT: <summary>
+```
+
+Gemini nhận cùng envelope workflow và trả về cùng format verdict
+(`VERDICT / NEXT_ACTION / ISSUES / SUGGESTIONS`). Lưu ý:
+
+- Verdict của Gemini **không** ghi vào approval state — merge gate vẫn chỉ nhận
+  approval từ ChatGPT (`templates/merge-approved-pr.sh`).
+- Dùng khi cần đối chiếu chéo, hoặc khi ChatGPT đang bận (lock) mà cần ý kiến nhanh.
 
 ---
 
@@ -276,13 +307,17 @@ docs/WORKFLOW.md               # review workflow: envelope, state machine, anti-
 docs/SETUP.md                  # cài máy mới + opencode-work
 install.sh                     # setup global bridge (config + npm + chromium + libs)
 install-project.sh             # cài policy + .opencode vào 1 repo (merge, không ghi đè)
-bin/chatgpt-review.mjs         # script bridge chính (Playwright, có lock + approval)
+bin/chatgpt-review.mjs         # script bridge ChatGPT chính (Playwright, có lock + approval)
 bin/chatgpt-review             # wrapper bash
+bin/gemini-review.mjs          # script bridge Gemini web (Playwright, có lock)
+bin/gemini-review              # wrapper bash
 bin/autoreview                 # toggle auto-review state
 bin/opencode-work              # tmux launcher chạy nhiều repo song song
 agent/chatgpt-review.md        # subagent dispatcher (workflow-aware, heredoc stdin)
+agent/gemini-review.md         # subagent second-opinion reviewer (Gemini web)
 skill/chatgpt-review/          # skill hướng dẫn
-command/*.md                   # /autoreview /chatgpt-new /chatgpt-project
+skill/gemini-review/           # skill hướng dẫn Gemini bridge
+command/*.md                   # /autoreview /chatgpt-new /gemini-new /chatgpt-project
 plugin/chatgpt-autoreview.ts   # plugin: chèn chỉ dẫn auto-review + env
 templates/opencode.jsonc       # policy chuẩn (Superpowers + permission)
 templates/AGENTS.collaboration.md  # mục collaboration chuẩn
@@ -298,8 +333,9 @@ bridge-config.json             # cấu hình ngưỡng + chế độ project
 2. `bash install.sh`
 3. `.../chatgpt-review login` → đăng nhập ChatGPT → chờ "LOGIN OK"
 4. `.../chatgpt-review status` → `loggedIn: true`
-5. `bash install-project.sh <repo>` cho từng repo
-6. `cp bin/opencode-work ~/.local/bin/` (tmux launcher)
-7. Restart opencode → `@chatgpt-review` dùng được ngay.
+5. (tùy chọn) `~/.config/opencode/gemini-bridge/bin/gemini-review login` → đăng nhập Google → `status` → `loggedIn: true`
+6. `bash install-project.sh <repo>` cho từng repo
+7. `cp bin/opencode-work ~/.local/bin/` (tmux launcher)
+8. Restart opencode → `@chatgpt-review` / `@gemini-review` dùng được ngay.
 
 Hoặc đưa repo cho bất kỳ agent nào kèm `AGENTS.md` — agent tự chạy mọi bước theo runbook.

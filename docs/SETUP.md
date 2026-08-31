@@ -14,14 +14,17 @@ bash install.sh
 ```
 
 `install.sh` copies agent/skill/command/plugin into `~/.config/opencode/`, installs
-`npm` deps + Playwright Chromium, and installs Chromium system libraries (sudo if
-available, else user-space `.deb` extraction into `libs/`).
+`npm` deps + Playwright Chromium (shared by the ChatGPT and Gemini bridges), and
+installs Chromium system libraries (sudo if available, else user-space `.deb`
+extraction into `libs/`).
 
 Then the only manual steps:
 
 ```bash
 ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review login    # sign in to ChatGPT (once)
 ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review status   # → "loggedIn": true
+~/.config/opencode/gemini-bridge/bin/gemini-review login      # optional: Google account for Gemini
+~/.config/opencode/gemini-bridge/bin/gemini-review status     # → "loggedIn": true
 ```
 
 Restart opencode to load the new agent/skill/commands.
@@ -87,6 +90,8 @@ a mode change to an existing session.
 ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review status   # loggedIn: true
 cd <repo> && ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review chats  # no crash
 ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review project list        # projects (may be empty)
+~/.config/opencode/gemini-bridge/bin/gemini-review status     # loggedIn: true (if set up)
+cd <repo> && ~/.config/opencode/gemini-bridge/bin/gemini-review chats    # no crash
 tmux ls                                                        # opencode-work session
 tmux list-panes -t opencode-work -F '#{pane_id} #{pane_current_path}'
 ```
@@ -99,7 +104,9 @@ Expected: exactly two panes, one per repository.
 |---|---|
 | `Chromium not found` | `npm exec --prefix ~/.config/opencode/chatgpt-bridge playwright install chromium` |
 | `libnspr4.so ... not found` | re-run `bash install.sh --deps` |
-| `loggedIn: false` | run `.../chatgpt-review login` and wait for "LOGIN OK" |
+| `loggedIn: false` (ChatGPT) | run `.../chatgpt-review login` and wait for "LOGIN OK" |
+| `loggedIn: false` (Gemini) | run `~/.config/opencode/gemini-bridge/bin/gemini-review login`, sign in with Google, complete any consent screen |
+| Gemini asks "unusual traffic" | solve it manually in the login window; cannot be automated |
 | `sessions should be nested with care` | the script handles nested tmux via `switch-client`; check `command -v opencode-work` |
 | session has wrong/one pane | `opencode-work --reset` |
 | OpenCode asks `external_directory` | ensure each pane was launched with the explicit repo path (the script does this) |
