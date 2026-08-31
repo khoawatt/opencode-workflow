@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# sources — lệnh ngắn gọn cho ChatGPT Sources sync (hybrid .git + metadata)
+# Dùng thay cho: NODE_PATH=... node bin/chatgpt-sources-sync.mjs ...
+set -e
+# Resolve symlink (when called via ~/.local/bin/sources)
+if command -v realpath >/dev/null 2>&1; then
+  SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+else
+  SCRIPT_DIR="$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")"
+  SCRIPT_DIR="$(cd "$SCRIPT_DIR" && pwd)"
+fi
+BRIDGE_NODE_MODULES="$HOME/.config/opencode/chatgpt-bridge/node_modules"
+MJS="$SCRIPT_DIR/chatgpt-sources-sync.mjs"
+
+if [ ! -f "$MJS" ]; then
+  echo "Không tìm thấy $MJS" >&2; exit 1
+fi
+
+# Tự set NODE_PATH để không phải gõ dài
+export NODE_PATH="$BRIDGE_NODE_MODULES${NODE_PATH:+:$NODE_PATH}"
+
+# Help nếu không có arg
+if [ $# -eq 0 ]; then
+  cat <<'HELP'
+sources — lệnh ngắn cho ChatGPT Project Sources (auto-zip)
+
+Dùng:
+  sources sync              Chủ động tạo ZIP mới + up lên GPT web + verify (ép rebuild nếu đã verified)
+  sources sync --force      Như trên, ép rebuild dù HEAD đã verified
+  sources build             Chỉ tạo ZIP hybrid (.git + metadata) local, chưa up
+  sources upload            Chỉ up file hiện tại trong state lên Sources
+  sources status            Xem 2 file gần nhất + project + state
+  sources reset             Xem trước sẽ xóa gì
+  sources reset --yes       Xóa sạch local + remote Sources + state (để bảo mật)
+  sources delete --file=X.zip  Xóa 1 file cụ thể
+
+Ví dụ:
+  sources sync --force      # xong feature, muốn up ngay
+  sources status            # kiểm tra
+  sources reset --yes       # dọn sạch khi cần riêng tư
+
+HELP
+  exit 0
+fi
+
+exec node "$MJS" "$@"
