@@ -9,3 +9,12 @@ autoreview.json
 # OS / editor
 .DS_Store
 *.log
+
+# ChatGPT Sources sync artifacts — repo snapshots for Project Sources (local only, contains .git + metadata)
+# Narrow pattern: only root opencode-workflow zips, not all *.zip in subdirs
+/opencode-workflow_*.zip
+/opencode-workflow-*.zip
+/opencode-workflow_*.md
+.chatgpt-sources/
+.sources-tracking.json
+tracking-last-version.json
