@@ -52,6 +52,39 @@ copy_if_absent "$REPO_DIR/command/autoreview.md"             "$TARGET/.opencode/
 copy_if_absent "$REPO_DIR/command/chatgpt-new.md"            "$TARGET/.opencode/commands/chatgpt-new.md"
 copy_if_absent "$REPO_DIR/command/chatgpt-project.md"        "$TARGET/.opencode/commands/chatgpt-project.md"
 
+# --- Sources sync (hybrid .git + metadata, retention 1) ---
+copy_if_absent "$REPO_DIR/bin/chatgpt-sources-sync.mjs"      "$TARGET/bin/chatgpt-sources-sync.mjs" 755
+copy_if_absent "$REPO_DIR/bin/sources"                       "$TARGET/bin/sources" 755
+[ -f "$TARGET/bin/sources" ] && ln -sfn sources "$TARGET/bin/chatgpt-sources" 2>/dev/null || true
+
+# --- .gitignore for Sources sync (hybrid, retention 1) ---
+GITIGNORE="$TARGET/.gitignore"
+if [ -f "$GITIGNORE" ]; then
+  if ! grep -q "ChatGPT Sources sync" "$GITIGNORE"; then
+    {
+      printf '\n# ChatGPT Sources sync artifacts — repo snapshots for Project Sources (local only, contains .git + metadata)\n'
+      printf '# Narrow pattern: only root probe zips, not all *.zip in subdirs\n'
+      printf '/*_probe_*.zip\n'
+      printf '/opencode-workflow_*.zip\n'
+      printf '/*_probe_*.md\n'
+      printf '.chatgpt-sources/\n'
+      printf '.sources-tracking.json\n'
+      printf 'tracking-last-version.json\n'
+    } >> "$GITIGNORE"
+    log "appended Sources sync ignore patterns to .gitignore"
+  else
+    warn ".gitignore already has Sources sync patterns; skipping"
+  fi
+else
+  {
+    printf '# ChatGPT Sources sync artifacts — repo snapshots for Project Sources (local only, contains .git + metadata)\n'
+    printf '/*_probe_*.zip\n'
+    printf '.chatgpt-sources/\n'
+    printf 'tracking-last-version.json\n'
+  } > "$GITIGNORE"
+  log "created .gitignore with Sources sync patterns"
+fi
+
 # --- AGENTS.md collaboration section ---
 # Never overwrite AGENTS.md; append the collaboration section only if the marker
 # is absent. If present, do nothing (it is already integrated).
