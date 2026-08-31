@@ -53,6 +53,9 @@ setup_config() {
 
   # Bridge binaries + package manifest + default config (do not overwrite local state)
   cp "$REPO_DIR/bin/chatgpt-review.mjs" "$REPO_DIR/bin/chatgpt-review" "$REPO_DIR/bin/autoreview" "$BRIDGE/bin/"
+  # Sources sync (hybrid .git + metadata) - also available as chatgpt-review sources / src-sync etc.
+  [ -f "$REPO_DIR/bin/chatgpt-sources-sync.mjs" ] && cp "$REPO_DIR/bin/chatgpt-sources-sync.mjs" "$BRIDGE/bin/" || true
+  [ -f "$REPO_DIR/bin/sources" ] && cp "$REPO_DIR/bin/sources" "$BRIDGE/bin/" || true
   cp "$REPO_DIR/package.json" "$BRIDGE/"
   [ -f "$BRIDGE/bridge-config.json" ] || cp "$REPO_DIR/bridge-config.json" "$BRIDGE/"
 
@@ -63,6 +66,8 @@ setup_config() {
 
   # Make scripts executable
   chmod +x "$BRIDGE/bin/chatgpt-review" "$BRIDGE/bin/chatgpt-review.mjs" "$BRIDGE/bin/autoreview"
+  [ -f "$BRIDGE/bin/chatgpt-sources-sync.mjs" ] && chmod +x "$BRIDGE/bin/chatgpt-sources-sync.mjs" || true
+  [ -f "$BRIDGE/bin/sources" ] && chmod +x "$BRIDGE/bin/sources" || true
   chmod +x "$GEMINI/bin/gemini-review" "$GEMINI/bin/gemini-review.mjs"
 
   # Short commands on PATH: chatgpt-review <cmd>, gemini-review <cmd>

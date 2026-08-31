@@ -1,2 +1,7 @@
 #!/usr/bin/env bash
+# Ensure playwright can be resolved from bridge when running from repo
+BRIDGE_NM="$HOME/.config/opencode/chatgpt-bridge/node_modules"
+if [ -d "$BRIDGE_NM" ]; then
+  export NODE_PATH="$BRIDGE_NM${NODE_PATH:+:$NODE_PATH}"
+fi
 exec node "$(dirname "$(realpath "$0")")/chatgpt-review.mjs" "$@"

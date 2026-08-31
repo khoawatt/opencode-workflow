@@ -3,7 +3,10 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, openSy
 import { homedir } from 'node:os'
 import { join, basename } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
-import { chromium } from 'playwright'
+import { createRequire } from 'node:module'
+const require = createRequire(import.meta.url)
+let chromium
+try { ({ chromium } = require('playwright')) } catch { try { const r2=require.createRequire(join(homedir(),'.config/opencode/chatgpt-bridge/package.json')); ({ chromium } = r2('playwright')) } catch { const r3=require.createRequire(join(homedir(),'.config/opencode/gemini-bridge/package.json')); ({ chromium } = r3('playwright')) } }
 
 const HOME = homedir()
 const BRIDGE_DIR = join(HOME, '.config/opencode/chatgpt-bridge')
@@ -102,6 +105,10 @@ USAGE:
   chatgpt-review.mjs approval       Get/set/clear the review approval state (get|set <verdict> <sha>|clear).
   chatgpt-review.mjs project        Manage ChatGPT Projects (create/list/attach/detach/resolve).
   chatgpt-review.mjs projects       Alias for "project list".
+  chatgpt-review.mjs sources        Manage Project Sources ZIP sync (hybrid .git + metadata)
+  chatgpt-review.mjs src            Alias for "sources"
+  chatgpt-review.mjs src-sync       Alias for "sources sync --force" (active manual sync)
+  chatgpt-review.mjs src-status     Alias for "sources status"
 
 LOGIN OPTIONS:
   --switch              Keep browser open to switch account (waits for session token to change; does not auto-close if already logged in).
@@ -980,6 +987,50 @@ async function doProject() {
   }
 }
 
+async function doSources() {
+  // Delegate to chatgpt-sources-sync.mjs (hybrid .git + metadata)
+  // Resolve script location: try bridge bin first, then repo bin, then alongside this script
+  const candidates = [
+    join(BRIDGE_DIR, 'bin', 'chatgpt-sources-sync.mjs'),
+    join(repoContext().root, 'bin', 'chatgpt-sources-sync.mjs'),
+    join(join(import.meta.url.replace('file://','').replace(/\/[^/]+$/, '')), 'chatgpt-sources-sync.mjs'),
+  ]
+  let script = null
+  for(const p of candidates){
+    if(existsSync(p)){ script=p; break }
+  }
+  if(!script) throw new Error('chatgpt-sources-sync.mjs not found (run bash install.sh --config)')
+  // Map aliases: src-sync -> sources sync --force, src-status -> sources status, etc.
+  let passArgs = args.slice(1)
+  // If called as `chatgpt-review src-sync` (mode is src-sync), translate to `sources sync --force`
+  if(mode === 'src-sync'){
+    passArgs = ['sync', '--force', ...passArgs]
+    // ensure we call sources sync
+    execFileSync('node', [script, 'sync', '--force', ...args.slice(1)], {stdio: 'inherit'})
+    return
+  }
+  if(mode === 'src-status'){
+    execFileSync('node', [script, 'status', ...args.slice(1)], {stdio: 'inherit'})
+    return
+  }
+  if(mode === 'src-reset'){
+    execFileSync('node', [script, 'reset', ...args.slice(1)], {stdio: 'inherit'})
+    return
+  }
+  if(mode === 'src-build'){
+    execFileSync('node', [script, 'build', ...args.slice(1)], {stdio: 'inherit'})
+    return
+  }
+  if(mode === 'src-upload'){
+    execFileSync('node', [script, 'upload', ...args.slice(1)], {stdio: 'inherit'})
+    return
+  }
+  // Normal: chatgpt-review sources <subcmd>  or  chatgpt-review src <subcmd>
+  // If no subcmd, default to status
+  if(passArgs.length===0) passArgs=['status']
+  execFileSync('node', [script, ...passArgs], {stdio: 'inherit'})
+}
+
 function withLock(fn) {
   return async () => {
     acquireLock()
@@ -998,4 +1049,11 @@ else if (mode === 'chats') { await doChats() }
 else if (mode === 'reset') { await withLock(doReset)() }
 else if (mode === 'approval') { await withLock(doApproval)() }
 else if (mode === 'project' || mode === 'projects') { await withLock(doProject)() }
+else if (mode === 'sources' || mode === 'src') { await doSources() }
+else if (mode === 'src-sync') { await doSources() }
+else if (mode === 'src-status') { await doSources() }
+else if (mode === 'src-reset') { await doSources() }
+else if (mode === 'src-build') { await doSources() }
+else if (mode === 'src-upload') { await doSources() }
+else if (mode.startsWith('src-')) { await doSources() }
 else { usage(); process.exit(1) }
