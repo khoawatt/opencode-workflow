@@ -98,6 +98,8 @@ patterns = [
 ]
 deny_files = [r'(^|/)\\.env$', r'(^|/)\\.env\\..*', r'.*\\.pem$', r'.*\\.key$', r'.*\\.p12$', r'.*credentials.*\\.json$']
 skip_content_scan = {'bin/chatgpt-sources-sync.mjs', 'bin/chatgpt-review.mjs', 'bin/gemini-review.mjs'}
+# Metadata dir is generated and contains diffs that may include scanner patterns as diff context - skip content scan there
+skip_prefixes = ('.chatgpt-review-metadata/',)
 issues=[]
 try:
     z=zipfile.ZipFile(path)
@@ -108,7 +110,7 @@ try:
         for pat in deny_files:
             if re.search(pat, name, re.I):
                 issues.append(f"DENY_FILE:{name} matches {pat}")
-        if name in skip_content_scan:
+        if name in skip_content_scan or name.startswith(skip_prefixes):
             continue
         if info.file_size > 500*1024:
             continue
@@ -239,7 +241,7 @@ USAGE:
   chatgpt-sources-sync.mjs upload [--file=PATH] [--headless] [--timeout=SECONDS]
   chatgpt-sources-sync.mjs delete [--file=NAME]        Delete one file (local+remote)
   chatgpt-sources-sync.mjs reset [--yes]               Delete ALL local zips + ALL remote Sources + clear state (for privacy)
-  chatgpt-sources-sync.mjs sync                        Full: build (if needed) + upload + verify + clean old (retention 2)
+  chatgpt-sources-sync.mjs sync [--force]              Active manual sync: build + upload + verify + clean (re-build even if HEAD already verified with --force)
   chatgpt-sources-sync.mjs list                        (alias for status)
 
 OPTIONS:
@@ -248,6 +250,7 @@ OPTIONS:
   --headless       try headless (may be blocked by Cloudflare)
   --headful        default
   --yes            skip confirm for reset
+  --force          force rebuild even if HEAD already verified (for active manual sync)
 
 Hybrid mode: ZIP keeps .git (source of truth) + .chatgpt-review-metadata/ for efficient retrieval. Secret scan + size gate fail-closed.
 State is canonical at .chatgpt-sources/state.json (atomic). Global lock at ~/.config/opencode/chatgpt-bridge/.lock is reused.
@@ -768,21 +771,25 @@ async function doDelete(){
 
 async function doSync(){
   // Full rotation: build (if HEAD changed or no zip) -> upload -> verify -> delete oldest
-  console.error(`[sync] starting full sync (build+upload+verify+clean)`)
+  // Active manual sync: use --force to rebuild even if HEAD already verified (different from auto waiting for feature)
+  console.error(`[sync] starting full sync (build+upload+verify+clean) - active manual mode`)
+  const force = process.argv.includes('--force')
   const ctx=repoContext()
   const headSha = execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim()
   let state=loadJson(STATE_FILE,null)
   let needBuild = true
-  if(state){
+  if(state && !force){
     const key=Object.keys(state.projects)[0]
     const cur = state.projects[key]?.current
     if(cur && cur.headSha===headSha && cur.status==='verified'){
-      console.error(`[sync] current already verified for HEAD ${headSha.slice(0,7)}, checking if upload needed`)
+      console.error(`[sync] current already verified for HEAD ${headSha.slice(0,7)}, use --force to rebuild anyway (active manual sync)`)
       needBuild=false
     } else if(cur && cur.headSha===headSha && cur.uploadedAt){
-      console.error(`[sync] current already built for HEAD ${headSha.slice(0,7)}`)
+      console.error(`[sync] current already built for HEAD ${headSha.slice(0,7)}, use --force to rebuild`)
       needBuild=false
     }
+  } else if(force){
+    console.error(`[sync] --force: will rebuild even though HEAD ${headSha.slice(0,7)} already has verified artifact`)
   }
   if(needBuild){
     console.error(`[sync] building new hybrid ZIP for HEAD ${headSha.slice(0,7)}`)
