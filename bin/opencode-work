@@ -6,7 +6,7 @@ CONFIG_FILE="${OPENCODE_WORK_CONFIG:-$HOME/.config/opencode/projects.conf}"
 
 # Default hardcoded projects (fallback if config not present — keeps backward compat)
 DEFAULT_NAMES=("feaon" "qvak")
-DEFAULT_URLS=("https://github.com/Akbi47/Feaon-ldp-v2.git" "https://github.com/Akbi47/qvak-portfolio.git")
+DEFAULT_URLS=("https://github.com/khoawatt/Feaon-ldp-v2.git" "https://github.com/khoawatt/qvak-portfolio.git")
 DEFAULT_PATHS=("$HOME/projects/personal/Feaon-ldp-v2" "$HOME/projects/personal/qvak-portfolio")
 
 # Dedicated local workspace: mặc định auto-approve các permission ở trạng thái ask.

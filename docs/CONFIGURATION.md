@@ -15,8 +15,8 @@ name|git_url|checkout_path
 Ví dụ:
 
 ```text
-feaon|https://github.com/Akbi47/Feaon-ldp-v2.git|~/projects/personal/Feaon-ldp-v2
-qvak|https://github.com/Akbi47/qvak-portfolio.git|~/projects/personal/qvak-portfolio
+feaon|https://github.com/khoawatt/Feaon-ldp-v2.git|~/projects/personal/Feaon-ldp-v2
+qvak|https://github.com/khoawatt/qvak-portfolio.git|~/projects/personal/qvak-portfolio
 api|git@github.com:your-team/api.git|~/projects/team/api
 ```
 

@@ -8,7 +8,7 @@ One-time setup to get the full OpenCode ↔ ChatGPT workflow running, including 
 ## 1. Install the workflow globally
 
 ```bash
-git clone https://github.com/Akbi47/opencode-workflow.git
+git clone https://github.com/khoawatt/opencode-workflow.git
 cd opencode-workflow
 bash install.sh
 ```

@@ -29,7 +29,7 @@ trên tài khoản ChatGPT Plus / Google của bạn (Playwright + Chrome).
 ## Cài đặt nhanh
 
 ```bash
-git clone https://github.com/Akbi47/opencode-workflow.git
+git clone https://github.com/khoawatt/opencode-workflow.git
 cd opencode-workflow
 bash install.sh                                   # cài bridge global (ChatGPT + Gemini)
 ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review login    # đăng nhập ChatGPT (1 lần)
@@ -68,7 +68,7 @@ Chi tiết: [`docs/SETUP.md`](docs/SETUP.md).
 ### Nhanh nhất — chạy 1 lệnh (tự động hoàn toàn)
 
 ```bash
-git clone https://github.com/Akbi47/opencode-workflow.git
+git clone https://github.com/khoawatt/opencode-workflow.git
 cd opencode-workflow
 bash install.sh
 ```
@@ -329,7 +329,7 @@ bridge-config.json             # cấu hình ngưỡng + chế độ project
 
 ## Đổi máy — checklist
 
-1. Clone repo: `git clone https://github.com/Akbi47/opencode-workflow.git`
+1. Clone repo: `git clone https://github.com/khoawatt/opencode-workflow.git`
 2. `bash install.sh`
 3. `.../chatgpt-review login` → đăng nhập ChatGPT → chờ "LOGIN OK"
 4. `.../chatgpt-review status` → `loggedIn: true`
