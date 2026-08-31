@@ -30,12 +30,26 @@ setup_config() {
   log "Copying opencode config into $CFG"
   mkdir -p "$CFG/agent" "$CFG/skills" "$CFG/command" "$CFG/plugins" "$BRIDGE/bin" "$GEMINI/bin"
 
+  # projects.conf for opencode-work launcher (N-project, port from codex-workflow)
+  if [ -f "$REPO_DIR/config/projects.conf" ]; then
+    if [ -f "$CFG/projects.conf" ]; then
+      log "Kept existing projects.conf: $CFG/projects.conf"
+    else
+      cp "$REPO_DIR/config/projects.conf" "$CFG/projects.conf"
+      chmod 0644 "$CFG/projects.conf" 2>/dev/null || true
+      log "Installed projects.conf: $CFG/projects.conf (edit to add repos, then opencode-work --reset)"
+    fi
+  fi
+
   [ -f "$REPO_DIR/agent/chatgpt-review.md" ] && cp "$REPO_DIR/agent/chatgpt-review.md" "$CFG/agent/"
   [ -f "$REPO_DIR/agent/gemini-review.md" ] && cp "$REPO_DIR/agent/gemini-review.md" "$CFG/agent/"
   cp -R "$REPO_DIR/skill/chatgpt-review" "$CFG/skills/" 2>/dev/null || true
   cp -R "$REPO_DIR/skill/gemini-review" "$CFG/skills/" 2>/dev/null || true
   [ -d "$REPO_DIR/command" ] && cp "$REPO_DIR/command/"*.md "$CFG/command/" 2>/dev/null || true
   [ -f "$REPO_DIR/plugin/chatgpt-autoreview.ts" ] && cp "$REPO_DIR/plugin/chatgpt-autoreview.ts" "$CFG/plugins/"
+  # session-auth for Gemini classifier (port from codex-workflow)
+  [ -f "$REPO_DIR/bin/session-auth.mjs" ] && cp "$REPO_DIR/bin/session-auth.mjs" "$BRIDGE/bin/" 2>/dev/null || true
+  [ -f "$REPO_DIR/bin/session-auth.mjs" ] && cp "$REPO_DIR/bin/session-auth.mjs" "$GEMINI/bin/" 2>/dev/null || true
 
   # Bridge binaries + package manifest + default config (do not overwrite local state)
   cp "$REPO_DIR/bin/chatgpt-review.mjs" "$REPO_DIR/bin/chatgpt-review" "$REPO_DIR/bin/autoreview" "$BRIDGE/bin/"

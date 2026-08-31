@@ -60,34 +60,44 @@ Then tell the human to restart opencode.
 ## Verification checklist (run all)
 
 ```bash
+bash -n bin/opencode-work install.sh install-project.sh bin/autoreview bin/chatgpt-review bin/gemini-review templates/merge-approved-pr.sh
+node --check bin/chatgpt-review.mjs bin/gemini-review.mjs bin/session-auth.mjs
+bash tests/test.sh
+
 ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review status
 #   {"profileExists":true,"cookiesExist":true,"loggedIn":true}
 
 cd <any repo> && ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review chats
-#   prints current repo+branch key and chat state (no crash)
+#   prints current repo+branch key (identity:branch) and chat state (no crash)
 
 ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review project list
 #   prints JSON array of ChatGPT Projects (may be empty on a fresh account)
 
 ~/.config/opencode/gemini-bridge/bin/gemini-review status
-#   {"profileExists":true,"cookiesExist":true,"loggedIn":true}   (if Gemini was set up)
+#   {"profileExists":true,"cookiesExist":true,"loggedIn":true,"guestAvailable":false}   (if Gemini was set up)
 
 cd <any repo> && ~/.config/opencode/gemini-bridge/bin/gemini-review chats
 #   prints current repo+branch key and chat state (no crash)
+
+opencode-work --status    # shows projects from ~/.config/opencode/projects.conf or fallback 2 pane
 ```
 
 If `status` shows `loggedIn: false`, run the matching `login` command and ask the
 human to sign in (ChatGPT account, or Google account for the Gemini bridge) in
-the browser window, then re-check.
+the browser window, then re-check. To switch ChatGPT account: `chatgpt-review login --switch` (keeps browser open, waits for token change; use `--wait=SECONDS` to keep open after new login). Gemini now distinguishes `loggedIn` vs `guestAvailable` via `session-auth.mjs` classifier (needs 3 stable checks).
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
 | `Chromium not found` | `npm exec --prefix ~/.config/opencode/chatgpt-bridge playwright install chromium` |
-| `libnspr4.so ... not found` | re-run `bash install.sh --deps` (installs system libs) |
-| `loggedIn: false` after login | the login wait loop may have missed the cookie; run `.../chatgpt-review login` again and wait for "LOGIN OK" |
+| `libnspr4.so ... not found` | re-run `bash install.sh --deps` (installs system libs via sudo or user-space `.deb` into `libs/`) |
+| `loggedIn: false` after login (ChatGPT) | run `.../chatgpt-review login --switch` if already logged in with other account; check `~/.config/opencode/chatgpt-bridge/.lock` stale |
+| `loggedIn: false` + `guestAvailable:true` (Gemini) | Gemini shows composer but no account identity — sign in fully, wait for 3 stable checks (5s settled) |
 | `project ... 401` | Cloudflare/headless; `ask` runs headful by default; ensure a desktop session exists |
+| `approval ... head_sha` mismatch | `chatgpt-review approval get` now validates 40-char SHA + repo/branch; `approval clear` then re-review exact HEAD |
+
+See also `docs/TROUBLESHOOTING.md` for full table and `docs/CONFIGURATION.md` for `projects.conf` + `opencode-work --status`.
 
 ## Rules
 

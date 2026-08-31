@@ -2,11 +2,12 @@
 // Gemini web bridge — sends a prompt to Google Gemini (gemini.google.com/app)
 // and scrapes the reply. Mirrors chatgpt-review.mjs: one conversation per
 // repo+branch, persistent Chrome profile, cross-process lock.
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, openSync, writeSync, closeSync, unlinkSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, openSync, writeSync, closeSync, unlinkSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, basename } from 'node:path'
-import { execSync } from 'node:child_process'
+import { execSync, execFileSync } from 'node:child_process'
 import { chromium } from 'playwright'
+import { classifyGeminiSession, advanceLoginStability } from './session-auth.mjs'
 
 const HOME = homedir()
 const BRIDGE_DIR = join(HOME, '.config/opencode/gemini-bridge')
@@ -74,6 +75,18 @@ const REPLY_SELECTORS = [
   'model-response',
   '.response-container-content',
 ]
+const SIGNED_OUT_SELECTORS = [
+  'a[href*="accounts.google.com/ServiceLogin"]',
+  'a[href*="accounts.google.com/v3/signin"]',
+  'a[href*="accounts.google.com/signin"]',
+  'a[href*="accounts.google.com/AccountChooser"]',
+]
+const ACCOUNT_IDENTITY_SELECTORS = [
+  'a[href*="accounts.google.com/SignOutOptions"]',
+  'a[href^="https://myaccount.google.com/"][aria-label]',
+  'a[aria-label^="Google Account:"]',
+  'button[aria-label^="Google Account:"]',
+]
 
 const DEFAULT_CONFIG = { max_chars: 400000, max_turns: 40, max_age_hours: 48 }
 
@@ -110,11 +123,11 @@ function pidAlive(pid) {
 }
 
 function acquireLock(timeoutSec = 300) {
-  mkdirSync(BRIDGE_DIR, { recursive: true })
+  mkdirSync(BRIDGE_DIR, { recursive: true, mode: 0o700 })
   const deadline = Date.now() + timeoutSec * 1000
   while (true) {
     try {
-      const fd = openSync(LOCK_FILE, 'wx')
+      const fd = openSync(LOCK_FILE, 'wx', 0o600)
       writeSync(fd, String(process.pid))
       closeSync(fd)
       return
@@ -149,30 +162,55 @@ function loadConfig() {
   }
 }
 
-function loadChats() {
+function loadJson(path, fallback) {
   try {
-    return JSON.parse(readFileSync(STATE_FILE, 'utf8'))
+    return JSON.parse(readFileSync(path, 'utf8'))
   } catch {
-    return { chats: {} }
+    return fallback
   }
+}
+
+function saveJson(path, value) {
+  mkdirSync(BRIDGE_DIR, { recursive: true, mode: 0o700 })
+  const temp = `${path}.${process.pid}.tmp`
+  writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+  renameSync(temp, path)
+}
+
+function loadChats() {
+  const v = loadJson(STATE_FILE, { chats: {} })
+  return v && typeof v === 'object' && v.chats && typeof v.chats === 'object' ? v : { chats: {} }
 }
 
 function saveChats(chats) {
-  mkdirSync(BRIDGE_DIR, { recursive: true })
-  writeFileSync(STATE_FILE, JSON.stringify(chats, null, 2))
+  saveJson(STATE_FILE, chats)
+}
+
+function repoContext() {
+  let root = process.cwd()
+  let branch = 'default'
+  try {
+    root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+  } catch {}
+  let identity = root
+  try {
+    const remote = execFileSync('git', ['remote', 'get-url', 'origin'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    const match = remote.match(/(?:github\.com[:/])([^/]+\/[^/]+?)(?:\.git)?$/i)
+    if (match) identity = match[1]
+  } catch {}
+  return {
+    root,
+    name: basename(root),
+    branch,
+    identity,
+    key: `${identity}:${branch}`,
+    legacy_key: `${basename(root)}:${branch}`,
+  }
 }
 
 function repoKey() {
-  try {
-    const top = execSync('git rev-parse --show-toplevel', { encoding: 'utf8' }).trim()
-    let branch = 'default'
-    try {
-      branch = execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf8' }).trim()
-    } catch {}
-    return `${basename(top)}:${branch}`
-  } catch {
-    return `${basename(process.cwd())}:default`
-  }
+  return repoContext().key
 }
 
 function isStale(chat, config) {
@@ -191,10 +229,42 @@ function chatIdFromUrl(url) {
 
 // ---------- browser ----------
 
+async function anyVisible(page, selectors) {
+  for (const selector of selectors) {
+    const matches = page.locator(selector)
+    for (let index = 0; index < (await matches.count()); index += 1) {
+      if (await matches.nth(index).isVisible().catch(() => false)) return true
+    }
+  }
+  return false
+}
+
+async function anyPresent(page, selectors) {
+  for (const selector of selectors) {
+    if (await page.locator(selector).count()) return true
+  }
+  return false
+}
+
+async function sessionState(page) {
+  let onGeminiOrigin = false
+  try { onGeminiOrigin = new URL(page.url()).hostname === 'gemini.google.com' } catch {}
+  let cookies = []
+  try {
+    cookies = await page.context().cookies(['https://gemini.google.com/', 'https://accounts.google.com/'])
+  } catch {}
+  return classifyGeminiSession({
+    onGeminiOrigin,
+    explicitSignedOut: await anyPresent(page, SIGNED_OUT_SELECTORS),
+    identityEvidence: await anyVisible(page, ACCOUNT_IDENTITY_SELECTORS),
+    canAsk: Boolean(await findInput(page)),
+    cookieNames: cookies.map((c) => c.name),
+  })
+}
+
 async function isLoggedIn(page) {
   try {
-    const cookies = await page.context().cookies(['https://gemini.google.com/', 'https://accounts.google.com/'])
-    return cookies.some(c => c.name === '__Secure-1PSID' || c.name === '__Secure-3PSID' || c.name === 'SAPISID')
+    return (await sessionState(page)).loggedIn
   } catch {
     return false
   }
@@ -311,19 +381,39 @@ async function waitForReply(page, timeoutSec, baselineCount) {
 async function doLogin() {
   const ctx = await launchPersistent(true)
   const page = ctx.pages()[0] || await ctx.newPage()
+  let documentVersion = 0
+  let observedDocumentVersion = 0
+  let lastNavigationAt = Date.now()
+  let stableChecks = 0
+  page.on('framenavigated', (frame) => {
+    if (frame === page.mainFrame()) {
+      documentVersion += 1
+      lastNavigationAt = Date.now()
+    }
+  })
   await page.goto(APP_URL, { waitUntil: 'domcontentloaded', timeout: 60000 })
+  observedDocumentVersion = documentVersion
   console.error('Browser opened. Sign in to your Google account (and any consent screen) in the window.')
-  console.error('Waiting for a real signed-in session cookie to appear...')
+  console.error('Waiting for a real signed-in session to settle (needs 3 stable checks)...')
   for (let i = 0; i < 600; i++) {
     try {
-      if (page.url().includes('gemini.google.com') && await isLoggedIn(page)) {
-        await sleep(2000)
+      if (page.isClosed()) throw new Error('browser window was closed before login completed')
+      const state = await sessionState(page)
+      const sameDocument = documentVersion === observedDocumentVersion
+      const documentSettled = Date.now() - lastNavigationAt >= 5000
+      stableChecks = advanceLoginStability(stableChecks, state, sameDocument, documentSettled)
+      observedDocumentVersion = documentVersion
+      if (stableChecks >= 3) {
         console.error('LOGIN OK — session saved.')
         await ctx.close()
         return
       }
-    } catch {}
-    await sleep(2000)
+    } catch (e) {
+      stableChecks = 0
+      observedDocumentVersion = documentVersion
+      if (page.isClosed()) throw e
+    }
+    await sleep(1000)
   }
   console.error('Timed out waiting for login (20 min). Session not saved.')
   await ctx.close()
@@ -348,9 +438,11 @@ async function doAsk() {
   if (!prompt) { console.error('empty prompt'); process.exit(1) }
 
   const config = loadConfig()
-  const key = repoKey()
+  const ctxRepo = repoContext()
+  const key = ctxRepo.key
+  const legacyKey = ctxRepo.legacy_key
   const chats = loadChats()
-  let chat = chats.chats[key]
+  let chat = chats.chats[key] || chats.chats[legacyKey]
 
   if (!forceNew && chat && !isStale(chat, config)) {
     console.error(`[bridge] reusing chat for ${key} (${chat.id}, turns=${chat.turns}, chars=${chat.chars})`)
@@ -359,6 +451,7 @@ async function doAsk() {
     else if (chat) console.error(`[bridge] chat for ${key} is stale (turns=${chat.turns}, chars=${chat.chars}) — starting fresh`)
     chat = null
     delete chats.chats[key]
+    if (legacyKey !== key) delete chats.chats[legacyKey]
   }
 
   const ctx = await launchPersistent(headful)
@@ -405,6 +498,7 @@ async function doAsk() {
         createdAt: (reused ? chat.createdAt : now) || now,
         lastUsedAt: now,
       }
+      if (legacyKey !== key) delete chats.chats[legacyKey]
       saveChats(chats)
     }
 
@@ -419,37 +513,49 @@ async function doStatus() {
   const cookies = join(PROFILE_DIR, 'Default', 'Cookies')
   const hasProfile = existsSync(PROFILE_DIR)
   let loggedIn = false
+  let guestAvailable = false
+  let lastState = null
   if (hasProfile && existsSync(localState)) {
+    let ctx
     try {
-      const ctx = await launchPersistent(true)
+      ctx = await launchPersistent(true)
       const page = ctx.pages()[0] || await ctx.newPage()
       await page.goto(APP_URL, { waitUntil: 'domcontentloaded', timeout: 45000 })
       await handleGoogleGate(page)
       for (let i = 0; i < 15; i++) {
-        if (await isLoggedIn(page)) { loggedIn = true; break }
+        lastState = await sessionState(page)
+        if (lastState.loggedIn) { loggedIn = true; guestAvailable = false; break }
+        guestAvailable = lastState.guestAvailable
         await sleep(2000)
       }
-      const title = await page.title()
-      console.error(`[status] url=${page.url().slice(0, 40)} title="${title}" loggedIn=${loggedIn}`)
-      await ctx.close()
+      const title = await page.title().catch(() => '')
+      console.error(`[status] url=${page.url().slice(0, 40)} title="${title}" loggedIn=${loggedIn} guestAvailable=${guestAvailable}`)
     } catch (e) {
       console.error(`[status] error: ${e.message}`)
+    } finally {
+      if (ctx) try { await ctx.close() } catch {}
     }
   }
-  console.log(JSON.stringify({ profileExists: hasProfile, cookiesExist: existsSync(cookies), loggedIn }))
+  // Keep backward compat: always include loggedIn, add guestAvailable for richer diagnostics
+  console.log(JSON.stringify({ profileExists: hasProfile, cookiesExist: existsSync(cookies), loggedIn, guestAvailable }))
 }
 
 async function doChats() {
-  const key = repoKey()
+  const ctx = repoContext()
+  const key = ctx.key
+  const legacyKey = ctx.legacy_key
   const chats = loadChats()
-  console.log(JSON.stringify({ currentKey: key, current: chats.chats[key] || null, all: chats.chats }, null, 2))
+  console.log(JSON.stringify({ currentKey: key, current: chats.chats[key] || chats.chats[legacyKey] || null, all: chats.chats }, null, 2))
 }
 
 async function doReset() {
-  const key = repoKey()
+  const ctx = repoContext()
+  const key = ctx.key
+  const legacyKey = ctx.legacy_key
   const chats = loadChats()
-  const had = !!chats.chats[key]
+  const had = !!(chats.chats[key] || chats.chats[legacyKey])
   delete chats.chats[key]
+  if (legacyKey !== key) delete chats.chats[legacyKey]
   saveChats(chats)
   console.log(had ? `reset ${key} — next ask will start a new conversation` : `no saved chat for ${key}`)
 }

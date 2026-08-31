@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, openSync, writeSync, closeSync, unlinkSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, openSync, writeSync, closeSync, unlinkSync, renameSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, basename } from 'node:path'
-import { execSync } from 'node:child_process'
+import { execSync, execFileSync } from 'node:child_process'
 import { chromium } from 'playwright'
 
 const HOME = homedir()
@@ -78,6 +78,7 @@ const NEW_CHAT_SELECTORS = [
 ]
 
 const DEFAULT_CONFIG = { mode: 'single', max_chars: 400000, max_turns: 40, max_age_hours: 48, project_mode: {} }
+const allowedVerdicts = new Set(['approve', 'approve-with-changes', 'request-changes', 'reject'])
 
 const NEW_PROJECT_BTN_SELECTORS = ['button[aria-label="New project"]']
 const PROJECT_NAME_INPUT = '#project-name, input[name="projectName"]'
@@ -132,11 +133,11 @@ function pidAlive(pid) {
 }
 
 function acquireLock(timeoutSec = 300) {
-  mkdirSync(BRIDGE_DIR, { recursive: true })
+  mkdirSync(BRIDGE_DIR, { recursive: true, mode: 0o700 })
   const deadline = Date.now() + timeoutSec * 1000
   while (true) {
     try {
-      const fd = openSync(LOCK_FILE, 'wx')
+      const fd = openSync(LOCK_FILE, 'wx', 0o600)
       writeSync(fd, String(process.pid))
       closeSync(fd)
       return
@@ -165,6 +166,21 @@ function releaseLock() {
 
 // ---------- state / config ----------
 
+function loadJson(path, fallback) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return fallback
+  }
+}
+
+function saveJson(path, value) {
+  mkdirSync(BRIDGE_DIR, { recursive: true, mode: 0o700 })
+  const temp = `${path}.${process.pid}.tmp`
+  writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+  renameSync(temp, path)
+}
+
 function loadConfig() {
   try {
     return { ...DEFAULT_CONFIG, ...JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) }
@@ -173,30 +189,45 @@ function loadConfig() {
   }
 }
 
+function normalizeState(value) {
+  return value && typeof value === 'object' && value.chats && typeof value.chats === 'object'
+    ? value
+    : { chats: {} }
+}
+
 function loadChats() {
-  try {
-    return JSON.parse(readFileSync(STATE_FILE, 'utf8'))
-  } catch {
-    return { chats: {} }
-  }
+  return normalizeState(loadJson(STATE_FILE, { chats: {} }))
 }
 
 function saveChats(chats) {
-  mkdirSync(BRIDGE_DIR, { recursive: true })
-  writeFileSync(STATE_FILE, JSON.stringify(chats, null, 2))
+  saveJson(STATE_FILE, chats)
+}
+
+function repoContext() {
+  let root = process.cwd()
+  let branch = 'default'
+  try {
+    root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+  } catch {}
+  let identity = root
+  try {
+    const remote = execFileSync('git', ['remote', 'get-url', 'origin'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    const match = remote.match(/(?:github\.com[:/])([^/]+\/[^/]+?)(?:\.git)?$/i)
+    if (match) identity = match[1]
+  } catch {}
+  return {
+    root,
+    name: basename(root),
+    branch,
+    identity,
+    key: `${identity}:${branch}`,
+    legacy_key: `${basename(root)}:${branch}`,
+  }
 }
 
 function repoKey() {
-  try {
-    const top = execSync('git rev-parse --show-toplevel', { encoding: 'utf8' }).trim()
-    let branch = 'default'
-    try {
-      branch = execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf8' }).trim()
-    } catch {}
-    return `${basename(top)}:${branch}`
-  } catch {
-    return `${basename(process.cwd())}:default`
-  }
+  return repoContext().key
 }
 
 function isStale(chat, config) {
@@ -214,20 +245,18 @@ function chatIdFromUrl(url) {
 }
 
 function repoName() {
-  return repoKey().split(':')[0]
+  return repoContext().name
 }
 
 function loadProjects() {
-  try {
-    return JSON.parse(readFileSync(PROJECTS_FILE, 'utf8'))
-  } catch {
-    return { projects: {} }
-  }
+  const value = loadJson(PROJECTS_FILE, { projects: {} })
+  return value && typeof value === 'object' && value.projects && typeof value.projects === 'object'
+    ? value
+    : { projects: {} }
 }
 
 function saveProjects(projects) {
-  mkdirSync(BRIDGE_DIR, { recursive: true })
-  writeFileSync(PROJECTS_FILE, JSON.stringify(projects, null, 2))
+  saveJson(PROJECTS_FILE, projects)
 }
 
 function projectEnabledForRepo(config, repo) {
@@ -689,10 +718,12 @@ async function doAsk() {
   if (!prompt) { console.error('empty prompt'); process.exit(1) }
 
   const config = loadConfig()
-  const key = repoKey()
-  const repo = repoName()
+  const ctxRepo = repoContext()
+  const key = ctxRepo.key
+  const legacyKey = ctxRepo.legacy_key
+  const repo = ctxRepo.name
   const chats = loadChats()
-  let chat = chats.chats[key]
+  let chat = chats.chats[key] || chats.chats[legacyKey]
 
   if (!forceNew && chat && !isStale(chat, config)) {
     console.error(`[bridge] reusing chat for ${key} (${chat.id}, turns=${chat.turns}, chars=${chat.chars})`)
@@ -701,6 +732,7 @@ async function doAsk() {
     else if (chat) console.error(`[bridge] chat for ${key} is stale (turns=${chat.turns}, chars=${chat.chars}) — starting fresh`)
     chat = null
     delete chats.chats[key]
+    if (legacyKey !== key) delete chats.chats[legacyKey]
   }
 
   const useProjectMode = useProject === null ? projectEnabledForRepo(config, repo) : useProject
@@ -773,6 +805,7 @@ async function doAsk() {
         createdAt: (reused ? chat.createdAt : now) || now,
         lastUsedAt: now,
       }
+      if (legacyKey !== key) delete chats.chats[legacyKey]
       saveChats(chats)
     }
 
@@ -809,39 +842,84 @@ async function doStatus() {
 }
 
 async function doChats() {
-  const key = repoKey()
+  const ctx = repoContext()
+  const key = ctx.key
+  const legacyKey = ctx.legacy_key
   const chats = loadChats()
-  console.log(JSON.stringify({ currentKey: key, current: chats.chats[key] || null, all: chats.chats }, null, 2))
+  console.log(JSON.stringify({ currentKey: key, current: chats.chats[key] || chats.chats[legacyKey] || null, all: chats.chats }, null, 2))
 }
 
 async function doReset() {
-  const key = repoKey()
+  const ctx = repoContext()
+  const key = ctx.key
+  const legacyKey = ctx.legacy_key
   const chats = loadChats()
-  const had = !!chats.chats[key]
+  const had = !!(chats.chats[key] || chats.chats[legacyKey])
   delete chats.chats[key]
+  if (legacyKey !== key) delete chats.chats[legacyKey]
   saveChats(chats)
   console.log(had ? `reset ${key} — next ask will start a new conversation` : `no saved chat for ${key}`)
 }
 
 async function doApproval() {
   const sub = args[1] || 'get'
-  const key = repoKey()
+  const ctx = repoContext()
+  const key = ctx.key
+  const legacyKey = ctx.legacy_key
   const chats = loadChats()
-  const entry = chats.chats[key] || {}
+  const entry = chats.chats[key] || chats.chats[legacyKey] || {}
 
   if (sub === 'get') {
     console.log(JSON.stringify(entry.approval || null))
   } else if (sub === 'set') {
     const verdict = args[2]
     const headSha = args[3]
-    if (!verdict || !headSha) { console.error('usage: approval set <verdict> <headSha> [pr]'); process.exit(1) }
-    const pr = args[4] || entry.approval?.pr || null
-    chats.chats[key] = { ...entry, approval: { verdict, headSha, pr, reviewedAt: Date.now() } }
+    const rawPr = args[4] !== undefined ? args[4] : (entry.approval?.pr ?? entry.approval?.pr === 0 ? String(entry.approval.pr) : 'none')
+    if (!allowedVerdicts.has(verdict)) {
+      console.error(`invalid verdict: ${verdict || '(missing)'} (allowed: ${[...allowedVerdicts].join(', ')})`)
+      process.exit(1)
+    }
+    if (!/^[0-9a-f]{40}$/i.test(headSha || '')) {
+      console.error('HEAD_SHA must be a full 40-character hexadecimal Git commit')
+      process.exit(1)
+    }
+    let pr = null
+    if (rawPr !== undefined && rawPr !== null && rawPr !== 'none' && rawPr !== '') {
+      const parsed = Number.parseInt(String(rawPr), 10)
+      if (!Number.isSafeInteger(parsed) || parsed < 1 || String(parsed) !== String(rawPr)) {
+        console.error('PR must be a positive integer or none')
+        process.exit(1)
+      }
+      pr = parsed
+    } else if (rawPr === 'none' || rawPr === '' || rawPr === null) {
+      pr = null
+    }
+    const nowIso = new Date().toISOString()
+    const approval = {
+      verdict,
+      headSha: headSha.toLowerCase(),
+      head_sha: headSha.toLowerCase(),
+      pr,
+      repo: ctx.identity,
+      branch: ctx.branch,
+      reviewer: 'chatgpt-review',
+      reviewedAt: Date.now(),
+      reviewed_at: nowIso,
+    }
+    const newEntry = { ...entry, approval }
+    chats.chats[key] = newEntry
+    if (legacyKey !== key) delete chats.chats[legacyKey]
     saveChats(chats)
-    console.log(JSON.stringify({ key, approval: chats.chats[key].approval }))
+    console.log(JSON.stringify({ key, approval: newEntry.approval }))
   } else if (sub === 'clear') {
     delete entry.approval
-    chats.chats[key] = entry
+    // Keep entry if it has other fields (like id), else remove
+    if (Object.keys(entry).length) {
+      chats.chats[key] = entry
+    } else {
+      delete chats.chats[key]
+    }
+    if (legacyKey !== key) delete chats.chats[legacyKey]
     saveChats(chats)
     console.log(`cleared approval for ${key}`)
   } else {

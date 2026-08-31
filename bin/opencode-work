@@ -1,99 +1,155 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SESSION="opencode-work"
+SESSION="${OPENCODE_WORK_SESSION:-opencode-work}"
+CONFIG_FILE="${OPENCODE_WORK_CONFIG:-$HOME/.config/opencode/projects.conf}"
 
-FEAON="$HOME/projects/personal/Feaon-ldp-v2"
-PORTFOLIO="$HOME/projects/personal/qvak-portfolio"
+# Default hardcoded projects (fallback if config not present — keeps backward compat)
+DEFAULT_NAMES=("feaon" "qvak")
+DEFAULT_URLS=("https://github.com/Akbi47/Feaon-ldp-v2.git" "https://github.com/Akbi47/qvak-portfolio.git")
+DEFAULT_PATHS=("$HOME/projects/personal/Feaon-ldp-v2" "$HOME/projects/personal/qvak-portfolio")
 
 # Dedicated local workspace: mặc định auto-approve các permission ở trạng thái ask.
-# Muốn quay về chế độ hỏi permission: OPENCODE_WORK_AUTO=0 opencode-work --reset
 OPENCODE_WORK_AUTO="${OPENCODE_WORK_AUTO:-1}"
-
-# ------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------
 
 die() {
     printf 'opencode-work: %s\n' "$*" >&2
     exit 1
 }
 
-require_command() {
-    command -v "$1" >/dev/null 2>&1 || die "Không tìm thấy command '$1' trong PATH."
+usage() {
+    cat <<'EOF'
+Usage: opencode-work [--reset|--status|--help]
+
+  no argument  Create the configured tmux workspace, or attach to it.
+  --reset      Recreate only the opencode-work tmux session.
+  --status     Show configured projects and current session state.
+  --help       Show this help.
+
+Environment:
+  OPENCODE_WORK_CONFIG   Override the project config path.
+  OPENCODE_WORK_SESSION  Override the tmux session name.
+  OPENCODE_WORK_AUTO     0 = manual permission, 1 = auto-approve (default).
+EOF
 }
 
-require_directory() {
-    [[ -d "$1" ]] || die "Không tìm thấy project directory: $1"
+expand_path() {
+    local value="$1"
+    case "$value" in
+        '~') printf '%s\n' "$HOME" ;;
+        '~/'*) printf '%s/%s\n' "$HOME" "${value:2}" ;;
+        /*) printf '%s\n' "$value" ;;
+        *) die "Checkout path must be absolute or start with ~/: $value" ;;
+    esac
+}
+
+load_projects() {
+    PROJECT_NAMES=()
+    PROJECT_URLS=()
+    PROJECT_PATHS=()
+
+    if [[ -r "$CONFIG_FILE" ]]; then
+        local line_number=0 name url checkout_path extra expanded_path
+        while IFS='|' read -r name url checkout_path extra || [[ -n "${name}${url}${checkout_path}${extra}" ]]; do
+            line_number=$((line_number + 1))
+            [[ -z "${name//[[:space:]]/}" || "$name" == \#* ]] && continue
+
+            [[ -n "$name" && -n "$url" && -n "$checkout_path" && -z "${extra:-}" ]] ||
+                die "Invalid config at $CONFIG_FILE:$line_number (expected name|git_url|checkout_path)."
+            [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] ||
+                die "Invalid project name '$name' at $CONFIG_FILE:$line_number."
+
+            expanded_path="$(expand_path "$checkout_path")"
+            PROJECT_NAMES+=("$name")
+            PROJECT_URLS+=("$url")
+            PROJECT_PATHS+=("$expanded_path")
+        done < "$CONFIG_FILE"
+
+        ((${#PROJECT_NAMES[@]} > 0)) || die "No projects configured in $CONFIG_FILE."
+    else
+        # Fallback to hardcoded defaults (backward compat)
+        PROJECT_NAMES=("${DEFAULT_NAMES[@]}")
+        PROJECT_URLS=("${DEFAULT_URLS[@]}")
+        PROJECT_PATHS=("${DEFAULT_PATHS[@]}")
+    fi
+}
+
+require_runtime() {
+    command -v tmux >/dev/null 2>&1 || die "tmux is not installed. See docs/SETUP.md."
+    command -v opencode >/dev/null 2>&1 || die "OpenCode CLI is not installed or not in PATH. See docs/SETUP.md."
+
+    local index
+    for index in "${!PROJECT_PATHS[@]}"; do
+        [[ -d "${PROJECT_PATHS[$index]}" ]] ||
+            die "Project '${PROJECT_NAMES[$index]}' is missing: ${PROJECT_PATHS[$index]}. Run install.sh or clone it."
+    done
 }
 
 attach_workspace() {
     if [[ -n "${TMUX:-}" ]]; then
         exec tmux switch-client -t "$SESSION"
-    else
-        exec tmux attach-session -t "$SESSION"
     fi
+    exec tmux attach-session -t "$SESSION"
 }
 
 session_is_valid() {
-    local pane_count
-    pane_count="$(tmux list-panes -t "$SESSION" -F '#{pane_id}' | wc -l | tr -d ' ')"
-    [[ "$pane_count" -eq 2 ]] || return 1
+    local actual_paths expected_path pane_count
+    pane_count="$(tmux list-panes -t "$SESSION" -F '#{pane_id}' 2>/dev/null | wc -l | tr -d ' ')"
+    [[ "$pane_count" -eq "${#PROJECT_PATHS[@]}" ]] || return 1
 
-    local paths
-    paths="$(tmux list-panes -t "$SESSION" -F '#{pane_current_path}')"
-
-    grep -Fxq "$FEAON" <<<"$paths" || return 1
-    grep -Fxq "$PORTFOLIO" <<<"$paths" || return 1
+    actual_paths="$(tmux list-panes -t "$SESSION" -F '#{pane_current_path}' 2>/dev/null)"
+    for expected_path in "${PROJECT_PATHS[@]}"; do
+        grep -Fxq "$expected_path" <<< "$actual_paths" || return 1
+    done
 }
 
-# ------------------------------------------------------------
-# Validate environment
-# ------------------------------------------------------------
+show_status() {
+    printf 'Config: %s\nSession: %s\nProjects:\n' "$CONFIG_FILE" "$SESSION"
+    local index
+    for index in "${!PROJECT_NAMES[@]}"; do
+        printf '  - %s -> %s\n' "${PROJECT_NAMES[$index]}" "${PROJECT_PATHS[$index]}"
+    done
 
-require_command tmux
-require_command opencode
-require_directory "$FEAON"
-require_directory "$PORTFOLIO"
+    if command -v tmux >/dev/null 2>&1 && tmux has-session -t "$SESSION" 2>/dev/null; then
+        printf 'State: running\n'
+        tmux list-panes -t "$SESSION" -F '  #{pane_index}: #{pane_current_path} (#{pane_current_command})'
+    else
+        printf 'State: stopped\n'
+    fi
+}
 
+# Validate OPENCODE_WORK_AUTO
 case "$OPENCODE_WORK_AUTO" in
     0|1) ;;
     *) die "OPENCODE_WORK_AUTO chỉ nhận 0 hoặc 1." ;;
 esac
 
-OPENCODE_BIN="$(command -v opencode)"
+OPENCODE_BIN="$(command -v opencode 2>/dev/null || echo opencode)"
 
-# ------------------------------------------------------------
-# Arguments
-# ------------------------------------------------------------
+[[ $# -le 1 ]] || die "Too many arguments. Use --help."
+case "${1:-}" in
+    ''|--reset|--status) ;;
+    --help) usage; exit 0 ;;
+    *) die "Unknown option: $1. Use --help." ;;
+esac
 
-if [[ $# -gt 1 ]]; then
-    die "Dùng: opencode-work [--reset]"
+load_projects
+
+if [[ "${1:-}" == "--status" ]]; then
+    show_status
+    exit 0
 fi
 
-if [[ "${1:-}" == "--reset" ]]; then
-    if tmux has-session -t "$SESSION" 2>/dev/null; then
-        tmux kill-session -t "$SESSION"
-    fi
-elif [[ $# -eq 1 ]]; then
-    die "Tham số không hợp lệ: $1. Dùng: opencode-work [--reset]"
-fi
+require_runtime
 
-# ------------------------------------------------------------
-# Reuse existing valid workspace
-# ------------------------------------------------------------
+if [[ "${1:-}" == "--reset" ]] && tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux kill-session -t "$SESSION"
+fi
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
-    if session_is_valid; then
-        attach_workspace
-    fi
-
-    die "Session '$SESSION' đang tồn tại nhưng không đúng workspace Feaon + Portfolio. Chạy: opencode-work --reset"
+    session_is_valid || die "Session '$SESSION' does not match the config. Run opencode-work --reset."
+    attach_workspace
 fi
-
-# ------------------------------------------------------------
-# Create workspace
-# ------------------------------------------------------------
 
 cleanup_failed_create() {
     local exit_code=$?
@@ -103,45 +159,27 @@ cleanup_failed_create() {
 }
 trap cleanup_failed_create ERR
 
-# Tạo pane Feaon và lấy pane_id thật từ tmux.
-# Không hard-code :0.0 / :0.1 nên không phụ thuộc base-index.
-FEAON_PANE="$(
-    tmux new-session \
-        -d \
-        -s "$SESSION" \
-        -c "$FEAON" \
-        -P \
-        -F '#{pane_id}'
+# Create workspace: first pane + split for remaining projects
+FIRST_PANE="$(
+    tmux new-session -d -s "$SESSION" -c "${PROJECT_PATHS[0]}" \
+        -P -F '#{pane_id}' "exec $(printf '%q' "$OPENCODE_BIN") $([[ "$OPENCODE_WORK_AUTO" == "1" ]] && echo --auto) $(printf '%q' "${PROJECT_PATHS[0]}")"
 )"
+tmux select-pane -t "$FIRST_PANE" -T "${PROJECT_NAMES[0]}"
 
-# Tạo pane Portfolio bên phải và lấy pane_id thật.
-PORTFOLIO_PANE="$(
-    tmux split-window \
-        -h \
-        -t "$FEAON_PANE" \
-        -c "$PORTFOLIO" \
-        -P \
-        -F '#{pane_id}'
-)"
+for ((index = 1; index < ${#PROJECT_NAMES[@]}; index++)); do
+    pane_id="$(
+        tmux split-window -d -t "$SESSION" -c "${PROJECT_PATHS[$index]}" \
+            -P -F '#{pane_id}' "exec $(printf '%q' "$OPENCODE_BIN") $([[ "$OPENCODE_WORK_AUTO" == "1" ]] && echo --auto) $(printf '%q' "${PROJECT_PATHS[$index]}")"
+    )"
+    tmux select-pane -t "$pane_id" -T "${PROJECT_NAMES[$index]}"
+done
 
-# Chia đều hai pane.
-tmux select-layout -t "$SESSION" even-horizontal >/dev/null
-
-# Chạy OpenCode với project path tường minh.
-# Điều này buộc OpenCode nhận đúng working directory của từng repo.
-if [[ "$OPENCODE_WORK_AUTO" == "1" ]]; then
-    FEAON_CMD="$(printf '%q ' "$OPENCODE_BIN" --auto "$FEAON")"
-    PORTFOLIO_CMD="$(printf '%q ' "$OPENCODE_BIN" --auto "$PORTFOLIO")"
+if ((${#PROJECT_NAMES[@]} == 2)); then
+    tmux select-layout -t "$SESSION" even-horizontal >/dev/null
 else
-    FEAON_CMD="$(printf '%q ' "$OPENCODE_BIN" "$FEAON")"
-    PORTFOLIO_CMD="$(printf '%q ' "$OPENCODE_BIN" "$PORTFOLIO")"
+    tmux select-layout -t "$SESSION" tiled >/dev/null
 fi
-
-tmux send-keys -t "$FEAON_PANE" "$FEAON_CMD" C-m
-tmux send-keys -t "$PORTFOLIO_PANE" "$PORTFOLIO_CMD" C-m
-
-# Focus Feaon khi mở lần đầu.
-tmux select-pane -t "$FEAON_PANE"
+tmux select-pane -t "$FIRST_PANE"
 
 trap - ERR
 attach_workspace

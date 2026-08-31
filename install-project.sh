@@ -55,11 +55,15 @@ copy_if_absent "$REPO_DIR/command/chatgpt-project.md"        "$TARGET/.opencode/
 # --- AGENTS.md collaboration section ---
 # Never overwrite AGENTS.md; append the collaboration section only if the marker
 # is absent. If present, do nothing (it is already integrated).
+# Port timestamp backup from codex-workflow/install-project.sh for safety.
 AGENTS="$TARGET/AGENTS.md"
 if [ -f "$AGENTS" ]; then
   if grep -q "ChatGPT–OpenCode Collaboration\|ChatGPT review bridge" "$AGENTS"; then
     warn "AGENTS.md already has the collaboration section; skipping"
   else
+    backup="$(mktemp "$AGENTS.backup.$(date +%Y%m%d%H%M%S).XXXXXX")"
+    cp -p -- "$AGENTS" "$backup"
+    log "Backed up AGENTS.md: $backup"
     { printf '\n'; cat "$TEMPLATES/AGENTS.collaboration.md"; } >> "$AGENTS"
     log "appended collaboration section to AGENTS.md"
   fi

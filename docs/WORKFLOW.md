@@ -74,18 +74,22 @@ For PRs: `APPROVED + CI GREEN → awaiting human merge`. No separate
 
 ## 5. Eliminating redundant review loops
 
-Approval state is stored per repo+branch via:
+Approval state is stored per repo+branch (`identity:branch` via `gh remote` → `owner/repo:branch`, fallback `basename:branch` with legacy migration) via:
 
 ```text
 chatgpt-review approval get|set <verdict> <headSha> [pr]|clear
 ```
 
-- If `approve` is recorded and the current HEAD SHA equals the stored `headSha`
-  and nothing materially changed → **do not re-review**; report "awaiting human merge".
-- Re-review IS warranted when: head SHA changed, new commits pushed, base
-  rebased, CI newly failed, fixes applied, scope changed.
+Validation (port from codex-workflow):
+- `verdict` must be one of `approve|approve-with-changes|request-changes|reject` (`allowedVerdicts`)
+- `headSha` must be full 40-char hex (`/^[0-9a-f]{40}$/i`)
+- `pr` must be positive integer or `none` (stored as `pr` + `head_sha` snake + `headSha` camel for compat, plus `repo`/`branch`/`reviewer`/`reviewed_at`)
+- Persistence is atomic (`mkdir 0o700` → `write 0o600` → `renameSync`) like codex
 
-`approve` does **not** mean OpenCode may merge. It means "ready for human merge".
+- If `approve` is recorded and the current HEAD SHA equals the stored `headSha` (either `headSha` or `head_sha`) and nothing materially changed → **do not re-review**; report "awaiting human merge".
+- Re-review IS warranted when: head SHA changed, new commits pushed, base rebased, CI newly failed, fixes applied, scope changed.
+
+`approve` does **not** mean OpenCode may merge. It means "ready for human merge". Approval is bound to exact `repo` (case-insensitive), `branch`, `pr`, and `head_sha` — see `templates/merge-approved-pr.sh` guards + TOCTOU double-read.
 
 ## 6. Auto-review behavior
 
@@ -122,6 +126,11 @@ repos wait; stale locks (dead PID) auto-recover.
 
 ## 10. Conversation / project behavior (preserved)
 
-- One ChatGPT thread per repo+branch (stale rollover via `max_chars`/`max_turns`/`max_age_hours`).
-- Optional ChatGPT Project per repo (`project_mode`, `ask --project`, `/chatgpt-project`).
-- `login`/`status`, `/chatgpt-new`, `/chatgpt-project` remain unchanged.
+- One ChatGPT thread per repo+branch (`identity:branch` via `gh remote`, legacy `basename:branch` migrated; stale rollover via `max_chars`/`max_turns`/`max_age_hours` `400000/40/48`).
+- Persistence via atomic `0o600` writes + `execFileSync` (no shell) + `repoContext` like codex.
+- Gemini bridge now uses `bin/session-auth.mjs` classifier (`loggedIn` vs `guestAvailable`, 5s settled + 3 stable checks via `advanceLoginStability`) — see `docs/GEMINI_WEB.md`.
+- Optional ChatGPT Project per repo (`project_mode`, `ask --project`, `/chatgpt-project`) with direct `fetch` + 3-retry capture (in-flight → goto → reload) and sidebar auto-expand (`dbg3 vs dbg4`).
+- `login --switch` / `--wait` / `--keep-open` for account switching (port from codex), `status` now shows `cookiesExist` + `guestAvailable`.
+- `login`/`status`, `/chatgpt-new`, `/gemini-new`, `/chatgpt-project`, `opencode-work --status` remain, plus `bash tests/test.sh` verification.
+
+See also `docs/CONFIGURATION.md` (projects.conf) and `docs/TROUBLESHOOTING.md` (lock, Cloudflare, guestAvailable, Project fetch, sidebar).
