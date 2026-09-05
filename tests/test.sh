@@ -19,6 +19,21 @@ node --check "$REPO_ROOT/bin/gemini-review.mjs"
 if [[ -f "$REPO_ROOT/bin/session-auth.mjs" ]]; then
   node --check "$REPO_ROOT/bin/session-auth.mjs"
 fi
+if [[ -f "$REPO_ROOT/bin/bridge-env.mjs" ]]; then
+  node --check "$REPO_ROOT/bin/bridge-env.mjs"
+else
+  fail "bin/bridge-env.mjs missing (shared .env loader)"
+fi
+# .env must never be committed; examples must exist
+grep -Eq '^\.env$' "$REPO_ROOT/.gitignore" || fail ".gitignore missing .env rule"
+[[ -f "$REPO_ROOT/config/chatgpt-bridge.env.example" ]] || fail "chatgpt .env example missing"
+[[ -f "$REPO_ROOT/config/gemini-bridge.env.example" ]] || fail "gemini .env example missing"
+grep -q "CHATGPT_EMAIL" "$REPO_ROOT/config/chatgpt-bridge.env.example" || fail "chatgpt example missing CHATGPT_EMAIL"
+grep -q "GEMINI_EMAIL" "$REPO_ROOT/config/gemini-bridge.env.example" || fail "gemini example missing GEMINI_EMAIL"
+# install.sh must ship the shared loader + create 0600 .env templates without overwriting
+grep -q "bridge-env.mjs" "$REPO_ROOT/install.sh" || fail "install.sh does not install bridge-env.mjs"
+grep -q 'login --auto' "$REPO_ROOT/install.sh" || fail "install.sh next-steps missing login --auto"
+grep -q 'CHATGPT_BRIDGE_DIR.*GEMINI_BRIDGE_DIR\|BRIDGE_DIR.*GEMINI' "$REPO_ROOT/bin/chatgpt-review.mjs" || true
 if [[ -f "$REPO_ROOT/plugin/chatgpt-autoreview.ts" ]]; then
   # plugin is TS, not checked via node --check; ensure it parses as valid TS syntax (basic)
   grep -q "ChatGPTAutoReview" "$REPO_ROOT/plugin/chatgpt-autoreview.ts" || fail "plugin missing ChatGPTAutoReview"
@@ -175,5 +190,72 @@ assert.equal(auth.advanceLoginStability(2, null, true), 0)
 assert.equal(auth.advanceLoginStability(2, { loggedIn: true, canAsk: false }, true), 0)
 EOF
 fi
+
+# Bridge .env loader unit tests (no browser needed)
+REPO_ROOT="$REPO_ROOT" node --input-type=module <<'EOF'
+import { strict as assert } from 'node:assert'
+import { pathToFileURL } from 'node:url'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
+const mod = await import(pathToFileURL(`${process.env.REPO_ROOT}/bin/bridge-env.mjs`))
+// quoted values keep inner # but drop trailing comment
+assert.deepEqual(mod.parseDotEnv('A=val # c\nB="a # b" # d\nC=\'x#y\'\nexport D=e\n'), { A: 'val', B: 'a # b', C: 'x#y', D: 'e' })
+assert.equal(mod.maskEmail('ab@example.com'), 'ab***@example.com')
+assert.equal(mod.maskEmail(''), '(missing)')
+assert.equal(mod.resolveBridgeDir('/dflt', 'CHATGPT_BRIDGE_DIR_TEST_XYZ'), '/dflt')
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-env-test-'))
+fs.writeFileSync(path.join(tmp, '.env'), 'CHATGPT_EMAIL=file@ex.com\nCHATGPT_PASSWORD=fp\n', { mode: 0o600 })
+let c = mod.loadBridgeCreds({ bridgeDir: tmp, envFileVar: 'CHATGPT_ENV_FILE_TEST_XYZ', emailKeys: mod.CHATGPT_KEYS.emailKeys, passwordKeys: mod.CHATGPT_KEYS.passwordKeys })
+assert.equal(c.email, 'file@ex.com')
+assert.equal(c.configured, true)
+fs.rmSync(tmp, { recursive: true, force: true })
+EOF
+
+# login --auto with missing creds must fail fast with .env help (no browser, no secret leak)
+env_missing="$TEST_ROOT/env-missing"
+mkdir -p "$env_missing/bridge"
+if CHATGPT_BRIDGE_DIR="$env_missing/bridge" CHATGPT_ENV_FILE="$env_missing/nope.env" \
+    node "$REPO_ROOT/bin/chatgpt-review.mjs" login --auto >/tmp/chatgpt-auto-missing.log 2>&1; then
+    fail "chatgpt login --auto with missing creds should exit non-zero"
+fi
+grep -q "\.env" /tmp/chatgpt-auto-missing.log || fail "chatgpt login --auto missing-creds help has no .env hint"
+if GEMINI_BRIDGE_DIR="$env_missing/bridge" GEMINI_ENV_FILE="$env_missing/nope.env" \
+    node "$REPO_ROOT/bin/gemini-review.mjs" login --auto >/tmp/gemini-auto-missing.log 2>&1; then
+    fail "gemini login --auto with missing creds should exit non-zero"
+fi
+grep -q "\.env" /tmp/gemini-auto-missing.log || fail "gemini login --auto missing-creds help has no .env hint"
+
+# status on an empty bridge dir must report envConfigured without launching a browser or leaking secrets
+env_status="$TEST_ROOT/env-status"
+mkdir -p "$env_status/cbridge" "$env_status/gbridge"
+printf 'CHATGPT_EMAIL=a@ex.com\nCHATGPT_PASSWORD=supersecret123\n' > "$env_status/cbridge/.env"
+chmod 600 "$env_status/cbridge/.env"
+chatgpt_status="$(CHATGPT_BRIDGE_DIR="$env_status/cbridge" node "$REPO_ROOT/bin/chatgpt-review.mjs" status 2>/dev/null)"
+echo "$chatgpt_status" | grep -q '"envConfigured": *true' || fail "chatgpt status should report envConfigured:true"
+echo "$chatgpt_status" | grep -q "supersecret123" && fail "chatgpt status leaked password"
+printf 'GEMINI_EMAIL=g@ex.com\n' > "$env_status/gbridge/.env"
+chmod 600 "$env_status/gbridge/.env"
+gemini_status="$(GEMINI_BRIDGE_DIR="$env_status/gbridge" node "$REPO_ROOT/bin/gemini-review.mjs" status 2>/dev/null)"
+echo "$gemini_status" | grep -q '"envConfigured": *false' || fail "gemini status should report envConfigured:false when password missing"
+echo "$gemini_status" | grep -q '"envFileExists": *true' || fail "gemini status should report envFileExists:true"
+
+# install --config must create 0600 .env templates and never overwrite real creds
+install_home="$TEST_ROOT/install-home"
+mkdir -p "$install_home"
+printf 'CHATGPT_EMAIL=keep@ex.com\nCHATGPT_PASSWORD=keepme\n' > "$install_home/pre-chatgpt.env"
+printf 'GEMINI_EMAIL=keep@g.com\nGEMINI_PASSWORD=keepme\n' > "$install_home/pre-gemini.env"
+HOME="$install_home" bash "$REPO_ROOT/install.sh" --config >/dev/null 2>&1 || fail "install.sh --config failed"
+[[ -f "$install_home/.config/opencode/chatgpt-bridge/.env" ]] || fail "chatgpt .env not created by install"
+[[ -f "$install_home/.config/opencode/gemini-bridge/.env" ]] || fail "gemini .env not created by install"
+[[ "$(stat -c '%a' "$install_home/.config/opencode/chatgpt-bridge/.env")" == 600 ]] || fail "chatgpt .env not 0600"
+[[ "$(stat -c '%a' "$install_home/.config/opencode/gemini-bridge/.env")" == 600 ]] || fail "gemini .env not 0600"
+[[ -f "$install_home/.config/opencode/chatgpt-bridge/bin/bridge-env.mjs" ]] || fail "bridge-env.mjs not installed (chatgpt)"
+[[ -f "$install_home/.config/opencode/gemini-bridge/bin/bridge-env.mjs" ]] || fail "bridge-env.mjs not installed (gemini)"
+# second run must keep existing creds
+printf 'CHATGPT_EMAIL=real@ex.com\nCHATGPT_PASSWORD=realpass\n' > "$install_home/.config/opencode/chatgpt-bridge/.env"
+HOME="$install_home" bash "$REPO_ROOT/install.sh" --config >/dev/null 2>&1 || fail "install.sh --config rerun failed"
+grep -q "real@ex.com" "$install_home/.config/opencode/chatgpt-bridge/.env" || fail "install overwrote existing chatgpt .env"
 
 printf 'PASS: launcher, workflow installers, ChatGPT review controls, and Gemini scraper safe-install checks\n'

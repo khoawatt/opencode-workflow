@@ -69,8 +69,11 @@ Approval state is stored per repo+branch in `chats.json` (via
 
 ## Requirements
 
-- One-time setup: `~/.config/opencode/chatgpt-bridge/bin/chatgpt-review login`
-  (opens a browser to sign in), verify with `status` → `"loggedIn": true`.
+- One-time setup, pick one: `~/.config/opencode/chatgpt-bridge/bin/chatgpt-review login`
+  (opens a browser to sign in — handles 2FA/CAPTCHA), **or** fill
+  `~/.config/opencode/chatgpt-bridge/.env` (`CHATGPT_EMAIL`/`CHATGPT_PASSWORD`,
+  `chmod 600`) then `login --auto` (no typing; `ask` auto-retries on expiry).
+  Verify with `status` → `"loggedIn": true` (`envConfigured:true` when `.env` set).
 - Bridge lives at `~/.config/opencode/chatgpt-bridge/bin/chatgpt-review`.
 
 ## Concurrency

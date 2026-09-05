@@ -19,14 +19,22 @@ installs Chromium system libraries (sudo if available, else user-space `.deb`
 extraction into `libs/`), and sets up `~/.config/opencode/projects.conf` for the
 `opencode-work` launcher (see `docs/CONFIGURATION.md`).
 
-Then the only manual steps:
+Then pick ONE login style per bridge (see `docs/AUTO_LOGIN.md`):
 
 ```bash
+# Manual (handles 2FA/CAPTCHA) — sign in once in the opened browser:
 ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review login    # sign in to ChatGPT (once)
 ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review status   # → "loggedIn": true
 # To switch account: chatgpt-review login --switch  (or --wait=30)
 ~/.config/opencode/gemini-bridge/bin/gemini-review login      # optional: Google account for Gemini
 ~/.config/opencode/gemini-bridge/bin/gemini-review status     # → "loggedIn": true, guestAvailable:false
+
+# ...or fully automatic from .env (no manual typing):
+# fill ~/.config/opencode/chatgpt-bridge/.env (CHATGPT_EMAIL/CHATGPT_PASSWORD, chmod 600)
+~/.config/opencode/chatgpt-bridge/bin/chatgpt-review login --auto
+# fill ~/.config/opencode/gemini-bridge/.env (GEMINI_EMAIL/GEMINI_PASSWORD, chmod 600)
+~/.config/opencode/gemini-bridge/bin/gemini-review login --auto
+# After that, `ask` auto-retries .env login on session expiry (disable with --no-auto-login).
 ```
 
 If `gemini-review status` shows `guestAvailable:true` (composer visible but no identity), sign in fully and wait for 3 stable checks (5s settled). See `docs/GEMINI_WEB.md`.
@@ -98,7 +106,7 @@ a mode change to an existing session.
 
 ```bash
 bash -n bin/opencode-work install.sh install-project.sh bin/autoreview bin/chatgpt-review bin/gemini-review templates/merge-approved-pr.sh
-node --check bin/chatgpt-review.mjs bin/gemini-review.mjs bin/session-auth.mjs
+node --check bin/chatgpt-review.mjs bin/gemini-review.mjs bin/session-auth.mjs bin/bridge-env.mjs
 bash tests/test.sh
 
 ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review status   # loggedIn: true

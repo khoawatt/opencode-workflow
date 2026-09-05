@@ -10,8 +10,11 @@ Kế thừa classifier xịn từ `codex-workflow/gemini-web/session-auth.mjs` (
 ## Cài và dùng
 
 ```bash
-~/.config/opencode/gemini-bridge/bin/gemini-review login      # đăng nhập Google (1 lần)
-~/.config/opencode/gemini-bridge/bin/gemini-review status     # → {"profileExists":true,"loggedIn":true,"guestAvailable":false}
+~/.config/opencode/gemini-bridge/bin/gemini-review login      # đăng nhập Google (1 lần, xử lý được 2FA/consent)
+# ...hoặc tự động từ .env (không gõ tay) — xem docs/AUTO_LOGIN.md:
+# fill ~/.config/opencode/gemini-bridge/.env (GEMINI_EMAIL/GEMINI_PASSWORD, chmod 600), rồi:
+~/.config/opencode/gemini-bridge/bin/gemini-review login --auto
+~/.config/opencode/gemini-bridge/bin/gemini-review status     # → {"profileExists":true,"loggedIn":true,"guestAvailable":false,"envConfigured":true}
 printf '%s\n' 'cross-check kết quả task vừa review bằng ChatGPT: <summary>' | \
   ~/.config/opencode/gemini-bridge/bin/gemini-review ask
 ~/.config/opencode/gemini-bridge/bin/gemini-review reset      # xóa mapping repo+branch

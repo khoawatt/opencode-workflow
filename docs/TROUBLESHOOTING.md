@@ -4,7 +4,11 @@
 |---|---|
 | `Chromium not found` | `npm exec --prefix ~/.config/opencode/chatgpt-bridge playwright install chromium` (hoặc `bash install.sh --deps`) |
 | `libnspr4.so` / `libnss3.so` / `libasound.so` not found | re-run `bash install.sh --deps` — installer thử `sudo apt-get install` nếu có passwordless sudo, else extract user-space `.deb` vào `libs/` |
-| `chatgpt-review` báo `loggedIn: false` | chạy `~/.config/opencode/chatgpt-bridge/bin/chatgpt-review login` trong desktop có display, đợi `LOGIN OK` |
+| `chatgpt-review` báo `loggedIn: false` | chạy `~/.config/opencode/chatgpt-bridge/bin/chatgpt-review login` trong desktop có display, đợi `LOGIN OK` — hoặc cấu hình `.env` rồi `login --auto` (xem `docs/AUTO_LOGIN.md`) |
+| `login --auto` báo thiếu credentials | điền `CHATGPT_EMAIL/CHATGPT_PASSWORD` (hoặc `GEMINI_EMAIL/GEMINI_PASSWORD`) vào bridge `.env`, `chmod 600`, chạy lại; shell env thắng file |
+| `login --auto` báo sai password / không tìm thấy account | kiểm tra lại email/password trong `.env` (log chỉ hiện email mask); đổi pass thì cập nhật `.env` |
+| `login --auto` báo 2FA/CAPTCHA/`browser may not be secure` | auto không qua được — chạy `login` thủ công 1 lần để lưu `profile/`, các lần sau tái dùng; `ask` sẽ tự retry `.env` khi hết session |
+| `.env` báo `insecure permissions` | `chmod 600 ~/.config/opencode/{chatgpt,gemini}-bridge/.env` |
 | `chatgpt-review login` muốn đổi account | `chatgpt-review login --switch` (giữ browser mở, đợi token đổi; thêm `--wait=30` để giữ mở 30s sau login mới) |
 | `chatgpt-review login` treo sau khi đóng window | đã fix `browserClosed` detection — đóng window sẽ báo `LOGIN OK (browser closed)` nếu có session, else `No session cookie`; nếu vẫn treo, `cat ~/.config/opencode/chatgpt-bridge/.lock` và check PID |
 | Bridge không tìm thấy prompt input | ChatGPT Web có thể đã đổi UI; cập nhật bridge, không coi lần review là thành công. Thử `chatgpt-review status` headful để debug `url/title/loggedIn` |

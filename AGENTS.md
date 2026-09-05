@@ -11,10 +11,15 @@ below exactly. Do not invent extra steps.
 
 ```bash
 bash install.sh
+# Pick ONE login style per bridge — manual (handles 2FA/CAPTCHA) or --auto from .env (no typing):
 ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review login   # human signs in to ChatGPT
+# ...or:  fill ~/.config/opencode/chatgpt-bridge/.env (CHATGPT_EMAIL/CHATGPT_PASSWORD, chmod 600), then:
+# ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review login --auto
 ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review status   # must print "loggedIn": true
 # Optional second-opinion reviewer (Google Gemini web):
 ~/.config/opencode/gemini-bridge/bin/gemini-review login      # human signs in with Google account
+# ...or:  fill ~/.config/opencode/gemini-bridge/.env (GEMINI_EMAIL/GEMINI_PASSWORD, chmod 600), then:
+# ~/.config/opencode/gemini-bridge/bin/gemini-review login --auto
 ~/.config/opencode/gemini-bridge/bin/gemini-review status     # must print "loggedIn": true
 ```
 
@@ -61,7 +66,7 @@ Then tell the human to restart opencode.
 
 ```bash
 bash -n bin/opencode-work install.sh install-project.sh bin/autoreview bin/chatgpt-review bin/gemini-review templates/merge-approved-pr.sh
-node --check bin/chatgpt-review.mjs bin/gemini-review.mjs bin/session-auth.mjs
+node --check bin/chatgpt-review.mjs bin/gemini-review.mjs bin/session-auth.mjs bin/bridge-env.mjs
 bash tests/test.sh
 
 ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review status
@@ -82,9 +87,13 @@ cd <any repo> && ~/.config/opencode/gemini-bridge/bin/gemini-review chats
 opencode-work --status    # shows projects from ~/.config/opencode/projects.conf or fallback 2 pane
 ```
 
-If `status` shows `loggedIn: false`, run the matching `login` command and ask the
-human to sign in (ChatGPT account, or Google account for the Gemini bridge) in
-the browser window, then re-check. To switch ChatGPT account: `chatgpt-review login --switch` (keeps browser open, waits for token change; use `--wait=SECONDS` to keep open after new login). Gemini now distinguishes `loggedIn` vs `guestAvailable` via `session-auth.mjs` classifier (needs 3 stable checks).
+If `status` shows `loggedIn: false`, either run the matching `login --auto` (when its
+`.env` holds `CHATGPT_EMAIL/CHATGPT_PASSWORD` or `GEMINI_EMAIL/GEMINI_PASSWORD`,
+`chmod 600`, `status` reports `envConfigured:true`) or run the manual `login` and
+ask the human to sign in in the browser window, then re-check. Manual login is
+still required once when 2FA/CAPTCHA/"browser may not be secure" appears — the
+saved profile is reused afterwards, and `ask` auto-retries `.env` login on expiry
+(unless `--no-auto-login`). To switch ChatGPT account: `chatgpt-review login --switch` (keeps browser open, waits for token change; use `--wait=SECONDS` to keep open after new login). Gemini now distinguishes `loggedIn` vs `guestAvailable` via `session-auth.mjs` classifier (needs 3 stable checks).
 
 ## Troubleshooting
 
@@ -101,7 +110,7 @@ See also `docs/TROUBLESHOOTING.md` for full table and `docs/CONFIGURATION.md` fo
 
 ## Rules
 
-- Never commit `profile/`, `chats.json`, `projects.json`, `autoreview.json`,
+- Never commit `profile/`, `chats.json`, `projects.json`, `autoreview.json`, `.env`,
   `node_modules/`, `libs/`, or any file under
   `~/.config/opencode/{chatgpt,gemini}-bridge/profile/`.
 - Never print session cookies or tokens.

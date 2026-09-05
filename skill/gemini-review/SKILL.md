@@ -44,9 +44,11 @@ SUGGESTIONS: <optional>
 
 ## Requirements
 
-- One-time setup: `~/.config/opencode/gemini-bridge/bin/gemini-review login`
-  (opens a browser; sign in with your Google account), verify with
-  `status` → `"loggedIn": true`.
+- One-time setup, pick one: `~/.config/opencode/gemini-bridge/bin/gemini-review login`
+  (opens a browser; sign in with your Google account — handles 2FA/consent),
+  **or** fill `~/.config/opencode/gemini-bridge/.env` (`GEMINI_EMAIL`/`GEMINI_PASSWORD`,
+  `chmod 600`) then `login --auto` (no typing; `ask` auto-retries on expiry).
+  Verify with `status` → `"loggedIn": true`.
 - Bridge lives at `~/.config/opencode/gemini-bridge/bin/gemini-review`.
 - Shares the Playwright Chromium install with the ChatGPT bridge.
 

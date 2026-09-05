@@ -47,9 +47,11 @@ setup_config() {
   cp -R "$REPO_DIR/skill/gemini-review" "$CFG/skills/" 2>/dev/null || true
   [ -d "$REPO_DIR/command" ] && cp "$REPO_DIR/command/"*.md "$CFG/command/" 2>/dev/null || true
   [ -f "$REPO_DIR/plugin/chatgpt-autoreview.ts" ] && cp "$REPO_DIR/plugin/chatgpt-autoreview.ts" "$CFG/plugins/"
-  # session-auth for Gemini classifier (port from codex-workflow)
+  # session-auth for Gemini classifier (port from codex-workflow) + shared .env loader
   [ -f "$REPO_DIR/bin/session-auth.mjs" ] && cp "$REPO_DIR/bin/session-auth.mjs" "$BRIDGE/bin/" 2>/dev/null || true
   [ -f "$REPO_DIR/bin/session-auth.mjs" ] && cp "$REPO_DIR/bin/session-auth.mjs" "$GEMINI/bin/" 2>/dev/null || true
+  [ -f "$REPO_DIR/bin/bridge-env.mjs" ] && cp "$REPO_DIR/bin/bridge-env.mjs" "$BRIDGE/bin/" 2>/dev/null || true
+  [ -f "$REPO_DIR/bin/bridge-env.mjs" ] && cp "$REPO_DIR/bin/bridge-env.mjs" "$GEMINI/bin/" 2>/dev/null || true
 
   # Bridge binaries + package manifest + default config (do not overwrite local state)
   cp "$REPO_DIR/bin/chatgpt-review.mjs" "$REPO_DIR/bin/chatgpt-review" "$REPO_DIR/bin/autoreview" "$BRIDGE/bin/"
@@ -63,6 +65,26 @@ setup_config() {
   cp "$REPO_DIR/bin/gemini-review.mjs" "$REPO_DIR/bin/gemini-review" "$GEMINI/bin/"
   cp "$REPO_DIR/package.json" "$GEMINI/"
   [ -f "$GEMINI/bridge-config.json" ] || printf '{ "max_chars": 400000, "max_turns": 40, "max_age_hours": 48 }\n' > "$GEMINI/bridge-config.json"
+
+  # Per-bridge .env templates for non-interactive auto-login (never overwrite real creds).
+  # NOTE: installed .env keeps EMPTY values (envConfigured:false) until the user
+  # fills real credentials. config/*.env.example holds documented placeholders.
+  if [ ! -f "$BRIDGE/.env" ]; then
+    printf '# ChatGPT auto-login (chmod 600, never commit)\n# See config/chatgpt-bridge.env.example for docs.\nCHATGPT_EMAIL=\nCHATGPT_PASSWORD=\n' > "$BRIDGE/.env"
+    chmod 0600 "$BRIDGE/.env" 2>/dev/null || true
+    log "Created $BRIDGE/.env (fill CHATGPT_EMAIL/CHATGPT_PASSWORD, chmod 600) — or run manual login"
+  else
+    chmod 0600 "$BRIDGE/.env" 2>/dev/null || true
+    log "Kept existing $BRIDGE/.env"
+  fi
+  if [ ! -f "$GEMINI/.env" ]; then
+    printf '# Gemini auto-login (chmod 600, never commit)\n# See config/gemini-bridge.env.example for docs.\nGEMINI_EMAIL=\nGEMINI_PASSWORD=\n' > "$GEMINI/.env"
+    chmod 0600 "$GEMINI/.env" 2>/dev/null || true
+    log "Created $GEMINI/.env (fill GEMINI_EMAIL/GEMINI_PASSWORD, chmod 600) — or run manual login"
+  else
+    chmod 0600 "$GEMINI/.env" 2>/dev/null || true
+    log "Kept existing $GEMINI/.env"
+  fi
 
   # Make scripts executable
   chmod +x "$BRIDGE/bin/chatgpt-review" "$BRIDGE/bin/chatgpt-review.mjs" "$BRIDGE/bin/autoreview"
@@ -166,9 +188,12 @@ case "$MODE" in
     setup_deps
     log "Setup complete."
     echo
-    log "Next steps:"
-    echo "  1. Sign in to ChatGPT once:  $BRIDGE/bin/chatgpt-review login"
-    echo "     (optional) Gemini:        $GEMINI/bin/gemini-review login   # sign in with your Google account"
+    log "Next steps (pick one login style per bridge):"
+    echo "  1a. Manual (1 lần, kể cả 2FA/CAPTCHA):  $BRIDGE/bin/chatgpt-review login"
+    echo "      (optional) Gemini:                  $GEMINI/bin/gemini-review login"
+    echo "  1b. Tự động từ .env (không gõ tay): fill $BRIDGE/.env rồi chạy:"
+    echo "      $BRIDGE/bin/chatgpt-review login --auto   # CHATGPT_EMAIL / CHATGPT_PASSWORD"
+    echo "      $GEMINI/bin/gemini-review login --auto    # GEMINI_EMAIL / GEMINI_PASSWORD"
     echo "  2. Verify:                   $BRIDGE/bin/chatgpt-review status   (expect loggedIn: true)"
     echo "     (optional) Gemini:        $GEMINI/bin/gemini-review status    (expect loggedIn: true)"
     echo "  3. Restart opencode so it loads the new agent/skill/commands."

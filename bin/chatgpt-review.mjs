@@ -4,12 +4,13 @@ import { homedir } from 'node:os'
 import { join, basename } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
+import { loadBridgeCreds, credsHelp, maskEmail, resolveBridgeDir, CHATGPT_KEYS } from './bridge-env.mjs'
 const require = createRequire(import.meta.url)
 let chromium
-try { ({ chromium } = require('playwright')) } catch { try { const r2=require.createRequire(join(homedir(),'.config/opencode/chatgpt-bridge/package.json')); ({ chromium } = r2('playwright')) } catch { const r3=require.createRequire(join(homedir(),'.config/opencode/gemini-bridge/package.json')); ({ chromium } = r3('playwright')) } }
+try { ({ chromium } = require('playwright')) } catch { try { const r2=createRequire(join(homedir(),'.config/opencode/chatgpt-bridge/package.json')); ({ chromium } = r2('playwright')) } catch { const r3=createRequire(join(homedir(),'.config/opencode/gemini-bridge/package.json')); ({ chromium } = r3('playwright')) } }
 
 const HOME = homedir()
-const BRIDGE_DIR = join(HOME, '.config/opencode/chatgpt-bridge')
+const BRIDGE_DIR = resolveBridgeDir(join(HOME, '.config/opencode/chatgpt-bridge'), 'CHATGPT_BRIDGE_DIR')
 const PROFILE_DIR = join(BRIDGE_DIR, 'profile')
 const LIB_DIR = join(BRIDGE_DIR, 'libs')
 const STATE_FILE = join(BRIDGE_DIR, 'chats.json')
@@ -45,7 +46,11 @@ function resolveChromium() {
   throw new Error('Chromium not found. Run: npm exec playwright install chromium  (or: ~/.config/opencode/chatgpt-bridge/install.sh)')
 }
 
-const EXECUTABLE = resolveChromium()
+let _executable = null
+function getExecutable() {
+  if (!_executable) _executable = resolveChromium()
+  return _executable
+}
 const CHAT_URL = 'https://chatgpt.com/'
 
 const args = process.argv.slice(2)
@@ -97,7 +102,7 @@ function usage() {
 Reuses one conversation per repo+branch; creates a new one when the context gets long.
 
 USAGE:
-  chatgpt-review.mjs login [--switch] [--wait=SECONDS]   Open a visible browser so you can sign in to ChatGPT once.
+  chatgpt-review.mjs login [--auto] [--switch] [--wait=SECONDS]   Sign in (manual once, or --auto from .env).
   chatgpt-review.mjs ask            Read prompt from stdin (or --file=FILE), send to ChatGPT, print reply.
   chatgpt-review.mjs status         Check whether a signed-in profile exists.
   chatgpt-review.mjs chats          List per-repo conversation state.
@@ -111,9 +116,12 @@ USAGE:
   chatgpt-review.mjs src-status     Alias for "sources status"
 
 LOGIN OPTIONS:
+  --auto / --from-env / --env   Sign in automatically with credentials from .env (no manual typing).
   --switch              Keep browser open to switch account (waits for session token to change; does not auto-close if already logged in).
   --wait=SECONDS        After a new login is detected, keep browser open for SECONDS (default 0; implies --switch).
   --keep-open / --stay-open   Alias for --switch.
+  --headless / --headful       Browser visibility for login (default headful; headless may hit Cloudflare).
+  --timeout=SECONDS     Max seconds to wait for auto-login (default 120).
 
 OPTIONS (for ask):
   --file=FILE        Read the prompt from FILE instead of stdin.
@@ -121,8 +129,17 @@ OPTIONS (for ask):
   --new              Force a new conversation (drop the saved mapping) for this repo+branch.
   --project          Use (or create) a ChatGPT Project for this repo's reviews.
   --no-project       Force plain single-chat mode for this call.
+  --no-auto-login    Do NOT attempt .env auto-login when the session is missing (default: auto-try if configured).
   --headless         Try headless mode (may be blocked by Cloudflare; default headful).
   --headful          Always show the browser window (default).
+
+ENV FILE (~/.config/opencode/chatgpt-bridge/.env, mode 600, never committed):
+  CHATGPT_EMAIL=you@example.com
+  CHATGPT_PASSWORD=your-password
+  # aliases: OPENAI_EMAIL / OPENAI_PASSWORD. Shell env overrides the file.
+  # Google-linked ChatGPT accounts: login goes through Google OAuth, so
+  # CHATGPT_PASSWORD must be the GOOGLE account password.
+  # Custom path: CHATGPT_ENV_FILE=/path/to/.env chatgpt-review login --auto
 
 CONFIG (bridge-config.json):
   mode              "single" (default) or "project" — global default for all repos.
@@ -473,12 +490,348 @@ async function isLoggedIn(page) {
 
 async function launchPersistent(headful) {
   const ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
-    executablePath: EXECUTABLE,
+    executablePath: getExecutable(),
     headless: !headful,
     args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'],
     viewport: { width: 1280, height: 900 },
   })
   return ctx
+}
+
+// ---------- env credentials + auto-login (no manual typing) ----------
+
+function loadChatgptCreds() {
+  return loadBridgeCreds({
+    bridgeDir: BRIDGE_DIR,
+    envFileVar: 'CHATGPT_ENV_FILE',
+    emailKeys: CHATGPT_KEYS.emailKeys,
+    passwordKeys: CHATGPT_KEYS.passwordKeys,
+  })
+}
+
+async function hasRealBox(el) {
+  try {
+    const box = await el.boundingBox()
+    return !!box && box.width >= 2 && box.height >= 2
+  } catch {
+    return false
+  }
+}
+
+async function fillFirstVisible(page, selectors, value, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    for (const sel of selectors) {
+      try {
+        const loc = page.locator(sel)
+        const n = await loc.count()
+        for (let i = 0; i < n; i++) {
+          const el = loc.nth(i)
+          try {
+            if (!(await hasRealBox(el))) continue
+            if (!(await el.isVisible().catch(() => false))) continue
+            await el.click({ timeout: 2000 }).catch(() => {})
+            await el.fill(value, { timeout: 5000 })
+            return sel
+          } catch {}
+        }
+      } catch {}
+    }
+    await sleep(500)
+  }
+  return null
+}
+
+async function clickFirstVisible(page, selectors, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    for (const sel of selectors) {
+      try {
+        const loc = page.locator(sel)
+        const n = await loc.count()
+        for (let i = 0; i < n; i++) {
+          const el = loc.nth(i)
+          try {
+            if (!(await hasRealBox(el))) continue
+            if (!(await el.isVisible().catch(() => false))) continue
+            await el.click({ timeout: 3000 })
+            return sel
+          } catch {}
+        }
+      } catch {}
+    }
+    await sleep(500)
+  }
+  return null
+}
+
+async function pageBodyText(page) {
+  try {
+    return String(await page.evaluate(() => document.body ? document.body.innerText.slice(0, 4000) : '')).toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+function detectChatgptBlocker(bodyText, url) {
+  if (!bodyText) return null
+  if (/wrong (email|password)|incorrect.*password|invalid.*credentials|wrong.*credentials/.test(bodyText)) {
+    return 'ChatGPT báo sai email/password — kiểm tra lại .env rồi thử lại.'
+  }
+  if (/verify you are human|captcha|challenge|unusual activity|suspicious|verify.*identity/.test(bodyText)) {
+    return 'ChatGPT yêu cầu xác minh người thật (CAPTCHA/Cloudflare) — hoàn thành 1 lần bằng `login` thủ công, các lần sau dùng session đã lưu.'
+  }
+  if (/two-?factor|2fa|multi-?factor|mfa|authenticator|verification code|check your email|we sent you|enter.*code/.test(bodyText)) {
+    return 'Tài khoản bật 2FA/mã xác minh qua email — auto-login không thể tự qua bước này. Đăng nhập thủ công 1 lần (`login`), session sẽ được tái dùng.'
+  }
+  if (/this browser or app may not be secure|browser.*not.*secure|couldn.t sign you in/.test(bodyText)) {
+    return 'ChatGPT/Google chặn trình duyệt tự động — đăng nhập thủ công 1 lần (`login`) để lưu session.'
+  }
+  if (/rate.?limit|too many (attempts|requests)|try again later/.test(bodyText)) {
+    return 'Bị giới hạn số lần đăng nhập — đợi vài phút rồi thử lại.'
+  }
+  if (url.includes('__cf_chl') || url.includes('challenges.cloudflare')) {
+    return 'Đang kẹt ở Cloudflare challenge — thử lại ở môi trường có display (headful) hoặc login thủ công 1 lần.'
+  }
+  return null
+}
+
+const CHATGPT_LOGIN_BTN = [
+  'button[data-testid="login-button"]',
+  'a[data-testid="login-button"]',
+  // Exact text first: :has-text() also matches zero-size parents/children,
+  // so exact match avoids the hidden duplicates on the landing page.
+  'button:text-is("Log in")',
+  'a:text-is("Log in")',
+  'button:has-text("Log in")',
+  'a:has-text("Log in")',
+  '[data-testid="login-link"]',
+]
+const CHATGPT_EMAIL_INPUT = [
+  'input[type="email"]',
+  'input[name="username"]',
+  'input[name="email"]',
+  '#email-input',
+  'input[id*="email"]',
+  'input[autocomplete="username"]',
+]
+const CHATGPT_PASSWORD_INPUT = [
+  'input[type="password"]',
+  'input[name="password"]',
+  '#password',
+  'input[autocomplete="current-password"]',
+]
+const CHATGPT_CONTINUE_BTN = [
+  'button[type="submit"]',
+  'button:has-text("Continue")',
+  'button:has-text("Log in")',
+  'button:has-text("Sign in")',
+]
+
+// Fill the first real (non-zero-size, visible) field matching selectors, then
+// submit via the button in the SAME form (avoids hitting unrelated submits on
+// pages that contain several forms, e.g. the chatgpt.com landing page).
+async function fillFieldAndSubmit(page, selectors, value, fallbackBtns, timeoutMs = 6000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      for (const sel of selectors) {
+        const loc = page.locator(sel)
+        const n = await loc.count()
+        for (let i = 0; i < n; i++) {
+          const el = loc.nth(i)
+          try {
+            if (!(await hasRealBox(el))) continue
+            if (!(await el.isVisible().catch(() => false))) continue
+            await el.click({ timeout: 2000 }).catch(() => {})
+            await el.fill(value, { timeout: 5000 })
+            await page.waitForTimeout(400)
+            // Scoped submit: button in the same form as the filled field.
+            try {
+              const scoped = el.locator('xpath=ancestor::form//button[@type="submit"]').first()
+              if ((await scoped.count()) > 0 && (await hasRealBox(scoped)) && (await scoped.isVisible().catch(() => false))) {
+                await scoped.click({ timeout: 3000 })
+                return true
+              }
+            } catch {}
+            // Fallback: generic continue buttons.
+            if (await clickFirstVisible(page, fallbackBtns, 4000)) return true
+            return true // filled at least; page may auto-advance
+          } catch {}
+        }
+      }
+    } catch {}
+    await sleep(500)
+  }
+  return false
+}
+
+async function anyRealVisible(page, selectors) {
+  for (const sel of selectors) {
+    try {
+      const loc = page.locator(sel)
+      const n = await loc.count()
+      for (let i = 0; i < n; i++) {
+        const el = loc.nth(i)
+        if ((await hasRealBox(el)) && (await el.isVisible().catch(() => false))) return true
+      }
+    } catch {}
+  }
+  return false
+}
+
+const GOOGLE_ID_INPUT = [
+  '#identifierId',
+  'input[name="identifier"]',
+  'input[autocomplete*="username"]',
+]
+const GOOGLE_ID_NEXT = [
+  '#identifierNext',
+  'button:text-is("Next")',
+  'button:has-text("Next")',
+]
+const GOOGLE_PW_INPUT = [
+  'input[name="Passwd"]',
+  'input[type="password"]',
+]
+const GOOGLE_PW_NEXT = [
+  '#passwordNext',
+  'button:text-is("Next")',
+  'button:has-text("Next")',
+]
+const GOOGLE_ALLOW_BTN = [
+  '#submit_approve_access',
+  'button:text-is("Allow")',
+  'button:text-is("Continue")',
+]
+const OPENAI_CODE_INPUT = [
+  'input[autocomplete="one-time-code"]',
+  'input[name="code"]',
+]
+
+// Fill email+password from .env and submit. Handles three login shapes:
+//  1. chatgpt.com "Log in" modal (email) → 2a or 2b
+//  2a. auth.openai.com password screen (email+password accounts)
+//  2b. Google OAuth (Google-linked accounts): identifier → password → consent
+// Throws with a human-readable message when a manual step is required.
+async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150 } = {}) {
+  if (await isLoggedIn(page)) return true
+  console.error(`[bridge] auto-login as ${maskEmail(creds.email)} (from ${creds.emailSource === 'env' ? 'env' : creds.envPath})…`)
+  await page.goto(CHAT_URL, { waitUntil: 'domcontentloaded', timeout: 60000 })
+  await handleCloudflare(page)
+
+  for (let i = 0; i < 5; i++) {
+    if (await isLoggedIn(page)) return true
+    await sleep(1000)
+  }
+
+  const onGoogle = () => page.url().includes('accounts.google.com')
+  const onAuthHost = () => /auth\.openai\.com|auth0\.com|accounts\.openai\.com/.test(page.url())
+  const deadline = Date.now() + timeoutSec * 1000
+  let acted = false // set once we submitted any credential (gates blocker aborts)
+  while (Date.now() < deadline) {
+    if (await isLoggedIn(page)) return true
+    const url = page.url()
+    const body = await pageBodyText(page)
+
+    // Email-code screen (unknown email): prefer password login when offered.
+    if (await anyRealVisible(page, OPENAI_CODE_INPUT)) {
+      const pwOpt = page.locator('button:text-is("Continue with password")').first()
+      try {
+        if ((await pwOpt.count()) > 0 && (await hasRealBox(pwOpt))) {
+          console.error('[bridge] email-code screen — switching to password login…')
+          await pwOpt.click({ timeout: 3000 })
+          acted = true
+          await page.waitForTimeout(2500)
+          continue
+        }
+      } catch {}
+      throw new Error('ChatGPT gửi mã xác minh về email (tài khoản chưa có password) — nhập mã thủ công 1 lần (`login`), hoặc bấm "Continue with password" trong bản web. Auto-login không đọc được inbox.')
+    }
+
+    const blocker = detectChatgptBlocker(body, url)
+    if (blocker && acted) throw new Error(blocker)
+
+    if (onGoogle()) {
+      // Google consent screen (has Allow button) takes precedence — the
+      // identifier page also mentions "continue to OpenAI".
+      if (await anyRealVisible(page, GOOGLE_ALLOW_BTN)) {
+        console.error('[bridge] Google consent — approving…')
+        await clickFirstVisible(page, GOOGLE_ALLOW_BTN, 5000)
+        acted = true
+        await page.waitForTimeout(3000)
+        continue
+      }
+      if (await anyRealVisible(page, GOOGLE_PW_INPUT)) {
+        console.error('[bridge] Google password screen…')
+        if (await fillFieldAndSubmit(page, GOOGLE_PW_INPUT, creds.password, GOOGLE_PW_NEXT, 8000)) acted = true
+        await page.waitForTimeout(3000)
+        continue
+      }
+      if (await anyRealVisible(page, GOOGLE_ID_INPUT)) {
+        console.error('[bridge] Google identifier screen…')
+        if (await fillFieldAndSubmit(page, GOOGLE_ID_INPUT, creds.email, GOOGLE_ID_NEXT, 8000)) acted = true
+        await page.waitForTimeout(3000)
+        continue
+      }
+      await sleep(2000)
+      continue
+    }
+
+    if (onAuthHost()) {
+      if (await anyRealVisible(page, CHATGPT_PASSWORD_INPUT)) {
+        console.error('[bridge] ChatGPT password screen…')
+        if (await fillFieldAndSubmit(page, CHATGPT_PASSWORD_INPUT, creds.password, CHATGPT_CONTINUE_BTN, 8000)) acted = true
+        await page.waitForTimeout(3000)
+        await handleCloudflare(page)
+        continue
+      }
+      if (await anyRealVisible(page, CHATGPT_EMAIL_INPUT)) {
+        if (await fillFieldAndSubmit(page, CHATGPT_EMAIL_INPUT, creds.email, CHATGPT_CONTINUE_BTN, 6000)) acted = true
+        await page.waitForTimeout(2500)
+        continue
+      }
+      await sleep(2000)
+      continue
+    }
+
+    // chatgpt.com landing / login modal.
+    if (await anyRealVisible(page, CHATGPT_EMAIL_INPUT)) {
+      console.error('[bridge] login modal — submitting email…')
+      if (await fillFieldAndSubmit(page, CHATGPT_EMAIL_INPUT, creds.email, CHATGPT_CONTINUE_BTN, 6000)) acted = true
+      await page.waitForTimeout(2500)
+      await handleCloudflare(page)
+      continue
+    }
+    await clickFirstVisible(page, CHATGPT_LOGIN_BTN, 4000)
+    await page.waitForTimeout(2000)
+    await handleCloudflare(page)
+  }
+  const lastUrl = page.url()
+  const lastBody = (await pageBodyText(page)).slice(0, 200)
+  const finalBlocker = detectChatgptBlocker(await pageBodyText(page), lastUrl)
+  throw new Error(finalBlocker || `Timed out after ${timeoutSec}s waiting for ChatGPT login as ${maskEmail(creds.email)} (last url: ${lastUrl.slice(0, 80)} — "${lastBody}"). Kiểm tra email/password trong .env hoặc đăng nhập thủ công 1 lần: chatgpt-review login`)
+}
+
+// Shared by `ask`/`project`: reuse session, else auto-login from .env when
+// available (unless --no-auto-login). Returns true when logged in.
+async function ensureChatgptLoggedIn(page, { allowAuto = true } = {}) {
+  for (let i = 0; i < 6; i++) {
+    if (await isLoggedIn(page)) return true
+    await sleep(1000)
+  }
+  if (!allowAuto) return false
+  const creds = loadChatgptCreds()
+  for (const w of creds.warnings) console.error(`[bridge] WARN: ${w}`)
+  if (!creds.configured) return false
+  console.error(`[bridge] session hết hạn — tự đăng nhập lại từ .env (${maskEmail(creds.email)})…`)
+  try {
+    await tryAutoLoginChatGPT(page, creds)
+    return await isLoggedIn(page)
+  } catch (e) {
+    console.error(`[bridge] auto-login thất bại: ${e.message}`)
+    return false
+  }
 }
 
 async function handleCloudflare(page) {
@@ -579,6 +932,7 @@ async function doLogin() {
   const loginArgs = args.slice(1)
   const has = (flag) => loginArgs.includes(flag)
   const waitArg = loginArgs.find((a) => a.startsWith('--wait='))
+  const autoMode = has('--auto') || has('--from-env') || has('--env')
   let keepOpenSec = 0
   let switchMode = has('--switch') || has('--stay-open') || has('--keep-open') || !!waitArg
   if (waitArg) {
@@ -586,6 +940,31 @@ async function doLogin() {
     if (!isNaN(v) && v >= 0) keepOpenSec = v
   } else if (has('--wait') || has('--stay-open') || has('--keep-open')) {
     keepOpenSec = 0
+  }
+  // --- non-interactive login from .env: no manual typing ---
+  if (autoMode) {
+    const creds = loadChatgptCreds()
+    for (const w of creds.warnings) console.error(`[bridge] WARN: ${w}`)
+    if (!creds.configured) {
+      console.error(credsHelp({ bridgeLabel: 'ChatGPT', envPath: creds.envPath, emailKeys: CHATGPT_KEYS.emailKeys, passwordKeys: CHATGPT_KEYS.passwordKeys }))
+      process.exit(1)
+    }
+    const timeoutArg = loginArgs.find((a) => a.startsWith('--timeout='))
+    const loginTimeout = timeoutArg ? parseInt(timeoutArg.slice(10), 10) || 120 : 120
+    const headful = has('--headless') ? false : true
+    const ctx = await launchPersistent(headful)
+    const page = ctx.pages()[0] || (await ctx.newPage())
+    try {
+      await tryAutoLoginChatGPT(page, creds, { timeoutSec: loginTimeout })
+      console.error('LOGIN OK — session saved (auto-login from .env).')
+      await ctx.close()
+      return
+    } catch (e) {
+      console.error(`Auto-login thất bại: ${e.message}`)
+      console.error('Fallback: chạy `chatgpt-review login` thủ công 1 lần để lưu session (2FA/CAPTCHA không tự qua được).')
+      try { await ctx.close() } catch {}
+      process.exit(1)
+    }
   }
   const ctx = await launchPersistent(true)
   const page = ctx.pages()[0] || (await ctx.newPage())
@@ -612,6 +991,7 @@ async function doLogin() {
   } else {
     console.error('Waiting for a real signed-in session cookie to appear...')
     console.error('Tip: to switch account, run:  chatgpt-review login --switch   (keeps browser open)')
+    console.error('Tip: for non-interactive login from .env, run:  chatgpt-review login --auto')
   }
 
   // capture initial token to detect account change in switch mode
@@ -709,6 +1089,7 @@ async function doAsk() {
   let forceNew = false
   let useProject = null
   let projectArg = null
+  let allowAutoLogin = true
   for (const a of args.slice(1)) {
     if (a.startsWith('--file=')) prompt = readFileSync(a.slice(7), 'utf8')
     else if (a.startsWith('--timeout=')) timeoutSec = parseInt(a.slice(10), 10)
@@ -716,6 +1097,7 @@ async function doAsk() {
     else if (a === '--new') forceNew = true
     else if (a === '--project') useProject = true
     else if (a === '--no-project') useProject = false
+    else if (a === '--no-auto-login') allowAutoLogin = false
     else if (a.startsWith('--project=')) { useProject = true; projectArg = a.slice(10) }
   }
   if (!prompt) {
@@ -751,13 +1133,13 @@ async function doAsk() {
     await page.goto(CHAT_URL, { waitUntil: 'domcontentloaded', timeout: 60000 })
     await handleCloudflare(page)
 
-    let loggedIn = false
-    for (let i = 0; i < 15; i++) {
-      if (await isLoggedIn(page)) { loggedIn = true; break }
-      await sleep(2000)
-    }
+    const loggedIn = await ensureChatgptLoggedIn(page, { allowAuto: allowAutoLogin })
     if (!loggedIn) {
-      throw new Error('ChatGPT not signed in. Run:  chatgpt-review.mjs login   first.')
+      const creds = loadChatgptCreds()
+      const hint = creds.configured
+        ? 'Auto-login từ .env thất bại — thử `login --auto` để xem chi tiết, hoặc `login` thủ công 1 lần.'
+        : `ChatGPT not signed in. Chạy thủ công 1 lần:  chatgpt-review login   — hoặc cấu hình .env rồi chạy:  chatgpt-review login --auto  (xem --help). File: ${creds.envPath}`
+      throw new Error(hint)
     }
 
     let project = null
@@ -826,6 +1208,7 @@ async function doStatus() {
   const localState = join(PROFILE_DIR, 'Local State')
   const cookies = join(PROFILE_DIR, 'Default', 'Cookies')
   const hasProfile = existsSync(PROFILE_DIR)
+  const creds = loadChatgptCreds()
   let loggedIn = false
   if (hasProfile && existsSync(localState)) {
     try {
@@ -845,7 +1228,7 @@ async function doStatus() {
       console.error(`[status] error: ${e.message}`)
     }
   }
-  console.log(JSON.stringify({ profileExists: hasProfile, cookiesExist: existsSync(cookies), loggedIn }))
+  console.log(JSON.stringify({ profileExists: hasProfile, cookiesExist: existsSync(cookies), loggedIn, envConfigured: creds.configured, envFileExists: creds.fileExists }))
 }
 
 async function doChats() {
