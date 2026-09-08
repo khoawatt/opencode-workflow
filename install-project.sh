@@ -47,10 +47,17 @@ copy_if_absent "$TEMPLATES/opencode.jsonc" "$TARGET/opencode.jsonc"
 copy_if_absent "$TEMPLATES/vision.md"                        "$TARGET/.opencode/agents/vision.md"
 copy_if_absent "$REPO_DIR/agent/chatgpt-review.md"           "$TARGET/.opencode/agents/chatgpt-review.md"
 copy_if_absent "$TEMPLATES/merge-approved-pr.sh"             "$TARGET/.opencode/scripts/merge-approved-pr.sh" 755
-copy_if_absent "$REPO_DIR/skill/chatgpt-review/SKILL.md"     "$TARGET/.opencode/skills/chatgpt-review/SKILL.md"
+for _skill in "$REPO_DIR/skill/"*/; do
+  [ -d "$_skill" ] || continue
+  _name="$(basename "$_skill")"
+  [ -f "$_skill/SKILL.md" ] || continue
+  copy_if_absent "$_skill/SKILL.md" "$TARGET/.opencode/skills/$_name/SKILL.md"
+done
 copy_if_absent "$REPO_DIR/command/autoreview.md"             "$TARGET/.opencode/commands/autoreview.md"
 copy_if_absent "$REPO_DIR/command/chatgpt-new.md"            "$TARGET/.opencode/commands/chatgpt-new.md"
 copy_if_absent "$REPO_DIR/command/chatgpt-project.md"        "$TARGET/.opencode/commands/chatgpt-project.md"
+copy_if_absent "$REPO_DIR/command/export-skill.md"           "$TARGET/.opencode/commands/export-skill.md"
+copy_if_absent "$REPO_DIR/command/gemini-new.md"             "$TARGET/.opencode/commands/gemini-new.md" 2>/dev/null || true
 
 # --- Sources sync (hybrid .git + metadata, retention 1) ---
 copy_if_absent "$REPO_DIR/bin/chatgpt-sources-sync.mjs"      "$TARGET/bin/chatgpt-sources-sync.mjs" 755
