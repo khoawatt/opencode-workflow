@@ -51,6 +51,7 @@ setup_config() {
   [ -f "$REPO_DIR/bin/session-auth.mjs" ] && cp "$REPO_DIR/bin/session-auth.mjs" "$GEMINI/bin/" 2>/dev/null || true
   [ -f "$REPO_DIR/bin/bridge-env.mjs" ] && cp "$REPO_DIR/bin/bridge-env.mjs" "$BRIDGE/bin/" 2>/dev/null || true
   [ -f "$REPO_DIR/bin/bridge-env.mjs" ] && cp "$REPO_DIR/bin/bridge-env.mjs" "$GEMINI/bin/" 2>/dev/null || true
+  [ -f "$REPO_DIR/bin/chatgpt-auth-flow.mjs" ] && cp "$REPO_DIR/bin/chatgpt-auth-flow.mjs" "$BRIDGE/bin/" 2>/dev/null || true
 
   # Bridge binaries + package manifest + default config (do not overwrite local state)
   cp "$REPO_DIR/bin/chatgpt-review.mjs" "$REPO_DIR/bin/chatgpt-review" "$REPO_DIR/bin/autoreview" "$BRIDGE/bin/"

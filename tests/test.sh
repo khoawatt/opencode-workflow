@@ -16,10 +16,7 @@ bash -n "$REPO_ROOT/bin/opencode-work" "$REPO_ROOT/install.sh" \
 bash -n "$REPO_ROOT/bin/chatgpt-review" "$REPO_ROOT/bin/gemini-review" 2>/dev/null || true
 node --check "$REPO_ROOT/bin/chatgpt-review.mjs"
 node --check "$REPO_ROOT/bin/gemini-review.mjs"
-grep -q "isAuth0ErrorPage" "$REPO_ROOT/bin/chatgpt-review.mjs" || fail "chatgpt bridge missing Auth0 Route Error detection"
-grep -q "waitForCredentialSubmitSettled" "$REPO_ROOT/bin/chatgpt-review.mjs" || fail "chatgpt bridge missing credential-submit settle guard"
-grep -q "Password đã được submit một lần" "$REPO_ROOT/bin/chatgpt-review.mjs" || fail "chatgpt bridge can re-submit password without a guard"
-grep -q "manualAuthRecoveries" "$REPO_ROOT/bin/chatgpt-review.mjs" || fail "manual chatgpt login missing Auth0 recovery"
+node --check "$REPO_ROOT/bin/chatgpt-auth-flow.mjs"
 if [[ -f "$REPO_ROOT/bin/session-auth.mjs" ]]; then
   node --check "$REPO_ROOT/bin/session-auth.mjs"
 fi
@@ -28,6 +25,86 @@ if [[ -f "$REPO_ROOT/bin/bridge-env.mjs" ]]; then
 else
   fail "bin/bridge-env.mjs missing (shared .env loader)"
 fi
+
+# ChatGPT/OpenAI auth transaction behavior (no browser required).
+REPO_ROOT="$REPO_ROOT" node --input-type=module <<'EOF'
+import { strict as assert } from 'node:assert'
+import { pathToFileURL } from 'node:url'
+
+const auth = await import(pathToFileURL(`${process.env.REPO_ROOT}/bin/chatgpt-auth-flow.mjs`))
+
+for (const body of [
+  'Oops, an error occurred',
+  'Route Error',
+  '400 Invalid content type',
+]) {
+  assert.equal(auth.isAuth0RouteError(body), true, `missed Route Error text: ${body}`)
+}
+assert.equal(auth.isAuth0RouteError('Incorrect password'), false)
+assert.equal(auth.isRecoverableOpenAiRouteError('Oops, an error occurred', 'https://auth.openai.com/u/login'), true)
+assert.equal(auth.isRecoverableOpenAiRouteError('Oops, an error occurred', 'https://accounts.google.com/signin'), false)
+assert.equal(auth.isRecoverableOpenAiRouteError('Oops, an error occurred', 'https://chatgpt.com/'), false)
+assert.match(auth.detectOpenAiAuthBlocker('Incorrect password', 'https://auth.openai.com/'), /email\/password/)
+assert.match(auth.detectOpenAiAuthBlocker('Enter your verification code', 'https://auth.openai.com/'), /2FA/)
+assert.equal(auth.detectOpenAiAuthBlocker('', 'https://auth.openai.com/'), null)
+
+const attempt = auth.createOpenAiAuthAttempt()
+assert.equal(auth.claimPasswordSubmit(attempt), true)
+assert.equal(auth.claimPasswordSubmit(attempt), false, 'password was submitted twice in one transaction')
+for (let recovery = 1; recovery <= 3; recovery++) {
+  assert.equal(auth.claimRouteRecovery(attempt), true, `recovery ${recovery} should be allowed`)
+  assert.equal(attempt.recoveries, recovery)
+  assert.equal(auth.claimPasswordSubmit(attempt), true, 'a recovered transaction should allow one new submit')
+  assert.equal(auth.claimPasswordSubmit(attempt), false, 'recovered transaction allowed a duplicate submit')
+}
+assert.equal(auth.claimRouteRecovery(attempt), false, 'manual/auto recovery exceeded three attempts')
+assert.match(auth.ROUTE_RECOVERY_EXHAUSTED_MESSAGE, /chatgpt-review logout\nchatgpt-review login/)
+
+async function runWait({ busy, terminalAt = null }) {
+  let clock = 0
+  const observedAt = []
+  const result = await auth.waitForOpenAiPasswordOutcome({
+    observe: async () => {
+      observedAt.push(clock)
+      if (terminalAt !== null && clock >= terminalAt) return { state: 'auth0-error' }
+      return { state: 'pending', busy }
+    },
+    wait: async (ms) => { clock += ms },
+    now: () => clock,
+    pollMs: 1000,
+  })
+  return { result, clock, observedAt }
+}
+
+const quiet = await runWait({ busy: false })
+assert.deepEqual(quiet.result, { state: 'stuck' })
+assert.equal(quiet.clock, 25000, 'quiet submit was declared stuck before 25 seconds')
+
+const busy = await runWait({ busy: true })
+assert.deepEqual(busy.result, { state: 'timeout' })
+assert.equal(busy.clock, 60000, 'busy submit did not continue to the 60-second hard timeout')
+
+const routeError = await runWait({ busy: false, terminalAt: 5000 })
+assert.deepEqual(routeError.result, { state: 'auth0-error' })
+assert.equal(routeError.clock, 5000)
+
+assert.equal(auth.isOpenAiAuthTransactionCookie({ domain: '.auth.openai.com', name: 'state' }), true)
+assert.equal(auth.isOpenAiAuthTransactionCookie({ domain: 'tenant.us.auth0.com', name: 'a0.spajs.txs.example' }), true)
+assert.equal(auth.isOpenAiAuthTransactionCookie({ domain: 'auth0.openai.com', name: 'nonce' }), true)
+assert.equal(auth.isOpenAiAuthTransactionCookie({ domain: '.auth.openai.com', name: 'auth0' }), false, 'Auth0 SSO cookie must be preserved')
+assert.equal(auth.isOpenAiAuthTransactionCookie({ domain: 'accounts.google.com', name: 'state' }), false)
+assert.equal(auth.isOpenAiAuthTransactionCookie({ domain: '.chatgpt.com', name: 'state' }), false)
+assert.equal(auth.isOpenAiAuthTransactionStorageKey('a0.spajs.txs.example'), true)
+assert.equal(auth.isOpenAiAuthTransactionStorageKey('oauth_state'), true)
+assert.equal(auth.isOpenAiAuthTransactionStorageKey('@@auth0spajs@@::client::audience::scope'), false, 'Auth0 token cache must be preserved')
+assert.equal(auth.isOpenAiAuthUrl('https://auth.openai.com/u/login/password'), true)
+assert.equal(auth.isOpenAiAuthUrl('https://tenant.us.auth0.com/authorize'), true)
+assert.equal(auth.isOpenAiAuthUrl('https://auth0.openai.com/authorize'), true)
+assert.equal(auth.isOpenAiAuthUrl('https://accounts.google.com/signin'), false)
+assert.equal(auth.isOpenAiAuthUrl('https://chatgpt.com/'), false)
+assert.equal(auth.isOpenAiAuthUrl('https://auth0.com.evil.example/'), false)
+assert.equal(auth.isOpenAiAuthUrl('https://notauth0.com/'), false)
+EOF
 # .env must never be committed; examples must exist
 grep -Eq '^\.env$' "$REPO_ROOT/.gitignore" || fail ".gitignore missing .env rule"
 [[ -f "$REPO_ROOT/config/chatgpt-bridge.env.example" ]] || fail "chatgpt .env example missing"
@@ -105,6 +182,7 @@ printf '{"max_turns": 7}\n' > "$chatgpt_bridge/bridge-config.json"
 HOME="$chatgpt_home" \
     bash "$REPO_ROOT/install.sh" --config >/dev/null 2>&1 || true
 [[ -f "$chatgpt_bridge/bridge-config.json" ]] || fail "bridge config not present after install --config"
+[[ -f "$chatgpt_bridge/bin/chatgpt-auth-flow.mjs" ]] || fail "ChatGPT auth-flow helper was not installed"
 grep -Fxq '{"max_turns": 7}' "$chatgpt_bridge/bridge-config.json" ||
     fail "existing bridge config was overwritten"
 

@@ -5,6 +5,18 @@ import { join, basename } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { loadBridgeCreds, credsHelp, maskEmail, resolveBridgeDir, CHATGPT_KEYS } from './bridge-env.mjs'
+import {
+  ROUTE_RECOVERY_EXHAUSTED_MESSAGE,
+  OPENAI_AUTH_TRANSACTION_STORAGE_KEY_PATTERN,
+  claimPasswordSubmit,
+  claimRouteRecovery,
+  createOpenAiAuthAttempt,
+  detectOpenAiAuthBlocker as detectChatgptBlocker,
+  isOpenAiAuthTransactionCookie,
+  isOpenAiAuthUrl,
+  isRecoverableOpenAiRouteError,
+  waitForOpenAiPasswordOutcome,
+} from './chatgpt-auth-flow.mjs'
 const require = createRequire(import.meta.url)
 let chromium
 try { ({ chromium } = require('playwright')) } catch { try { const r2=createRequire(join(homedir(),'.config/opencode/chatgpt-bridge/package.json')); ({ chromium } = r2('playwright')) } catch { const r3=createRequire(join(homedir(),'.config/opencode/gemini-bridge/package.json')); ({ chromium } = r3('playwright')) } }
@@ -580,47 +592,29 @@ async function pageBodyText(page) {
   }
 }
 
-function detectChatgptBlocker(bodyText, url) {
-  if (!bodyText) return null
-  if (/wrong (email|password)|incorrect.*password|invalid.*credentials|wrong.*credentials/.test(bodyText)) {
-    return 'ChatGPT báo sai email/password — kiểm tra lại .env rồi thử lại.'
-  }
-  if (/verify you are human|captcha|challenge|unusual activity|suspicious|verify.*identity/.test(bodyText)) {
-    return 'ChatGPT yêu cầu xác minh người thật (CAPTCHA/Cloudflare) — hoàn thành 1 lần bằng `login` thủ công, các lần sau dùng session đã lưu.'
-  }
-  if (/two-?factor|2fa|multi-?factor|mfa|authenticator|verification code|check your email|we sent you|enter.*code/.test(bodyText)) {
-    return 'Tài khoản bật 2FA/mã xác minh qua email — auto-login không thể tự qua bước này. Đăng nhập thủ công 1 lần (`login`), session sẽ được tái dùng.'
-  }
-  if (/this browser or app may not be secure|browser.*not.*secure|couldn.t sign you in/.test(bodyText)) {
-    return 'ChatGPT/Google chặn trình duyệt tự động — đăng nhập thủ công 1 lần (`login`) để lưu session.'
-  }
-  if (/rate.?limit|too many (attempts|requests)|try again later/.test(bodyText)) {
-    return 'Bị giới hạn số lần đăng nhập — đợi vài phút rồi thử lại.'
-  }
-  if (url.includes('__cf_chl') || url.includes('challenges.cloudflare')) {
-    return 'Đang kẹt ở Cloudflare challenge — thử lại ở môi trường có display (headful) hoặc login thủ công 1 lần.'
-  }
-  return null
-}
-
-const isAuth0ErrorPage = (bodyText) =>
-  /oops,? an error occurred|route error|invalid content type/.test(bodyText || '')
-
 async function clearAuthTransaction(page) {
-  try {
-    if (page.isClosed && page.isClosed()) return
-    const ctx = page.context()
-    const cookies = await ctx.cookies()
-    for (const cookie of cookies) {
-      const domain = cookie.domain || ''
-      const name = cookie.name || ''
-      if (/auth0|auth\.openai|accounts\.openai/i.test(domain) || /^auth0/i.test(name)) {
-        try {
-          await ctx.clearCookies({ name: cookie.name, domain: cookie.domain, path: cookie.path })
-        } catch {}
-      }
+  if (page.isClosed && page.isClosed()) return
+  const ctx = page.context()
+  const cookies = await ctx.cookies()
+  for (const cookie of cookies) {
+    if (isOpenAiAuthTransactionCookie(cookie)) {
+      await ctx.clearCookies({ name: cookie.name, domain: cookie.domain, path: cookie.path })
     }
-  } catch {}
+  }
+
+  // Browser storage is origin-scoped. Only remove transient Auth0/OpenAI
+  // transaction entries from the current auth origin; ChatGPT and Google
+  // profile/session state remain untouched.
+  if (isOpenAiAuthUrl(page.url())) {
+    await page.evaluate((keyPattern) => {
+      const transactionKey = new RegExp(keyPattern, 'i')
+      for (const storage of [sessionStorage, localStorage]) {
+        for (const key of Object.keys(storage)) {
+          if (transactionKey.test(key)) storage.removeItem(key)
+        }
+      }
+    }, OPENAI_AUTH_TRANSACTION_STORAGE_KEY_PATTERN).catch(() => {})
+  }
 }
 
 async function restartChatgptLoginFlow(page) {
@@ -678,11 +672,8 @@ async function fillFieldAndSubmit(page, selectors, value, fallbackBtns, timeoutM
             if (!(await hasRealBox(el))) continue
             if (!(await el.isVisible().catch(() => false))) continue
             await el.click({ timeout: 2000 }).catch(() => {})
-            try { await el.click({ clickCount: 3, timeout: 1000 }) } catch {}
-            try { await el.press('ControlOrMeta+A', { timeout: 1000 }) } catch {}
-            try { await el.press('Backspace', { timeout: 1000 }) } catch {}
-            await el.pressSequentially(value, { delay: 35 })
-            await sleep(400)
+            await el.fill(value, { timeout: 5000 })
+            await page.waitForTimeout(400)
             // Scoped submit: button in the same form as the filled field.
             try {
               const scoped = el.locator('xpath=ancestor::form//button[@type="submit"]').first()
@@ -725,33 +716,29 @@ const AUTH_SUBMIT_BUSY_SELECTORS = [
   'button[type="submit"] [class*="animate-spin"]',
 ]
 
-async function waitForCredentialSubmitSettled(page, passwordSelectors, startUrl, timeoutMs = 60000) {
-  const deadline = Date.now() + timeoutMs
-  let idleSince = 0
-  while (Date.now() < deadline) {
-    await sleep(750)
-    if (page.isClosed && page.isClosed()) return { state: 'closed' }
-    if (await isLoggedIn(page)) return { state: 'logged-in' }
+async function waitForChatgptPasswordSubmit(page, startUrl) {
+  return waitForOpenAiPasswordOutcome({
+    wait: sleep,
+    observe: async () => {
+      if (page.isClosed && page.isClosed()) return { state: 'closed' }
+      if (await isLoggedIn(page)) return { state: 'logged-in' }
 
-    const url = page.url()
-    const body = await pageBodyText(page)
-    if (isAuth0ErrorPage(body)) return { state: 'auth0-error' }
+      const url = page.url()
+      const body = await pageBodyText(page)
+      if (isRecoverableOpenAiRouteError(body, url)) return { state: 'auth0-error' }
 
-    const blocker = detectChatgptBlocker(body, url)
-    if (blocker) return { state: 'blocker', message: blocker }
+      const blocker = detectChatgptBlocker(body, url)
+      if (blocker) return { state: 'blocker', message: blocker }
+      if (url !== startUrl || !(await anyRealVisible(page, CHATGPT_PASSWORD_INPUT))) {
+        return { state: 'navigated' }
+      }
 
-    const passwordVisible = await anyRealVisible(page, passwordSelectors)
-    if (!passwordVisible || url !== startUrl) return { state: 'navigated' }
-
-    const busy = await anyRealVisible(page, AUTH_SUBMIT_BUSY_SELECTORS)
-    if (busy) {
-      idleSince = 0
-    } else {
-      if (!idleSince) idleSince = Date.now()
-      if (Date.now() - idleSince >= 8000) return { state: 'idle' }
-    }
-  }
-  return { state: 'timeout' }
+      return {
+        state: 'pending',
+        busy: await anyRealVisible(page, AUTH_SUBMIT_BUSY_SELECTORS),
+      }
+    },
+  })
 }
 
 const GOOGLE_ID_INPUT = [
@@ -803,22 +790,17 @@ async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150 } = {}) {
   const onAuthHost = () => /auth\.openai\.com|auth0\.com|accounts\.openai\.com/.test(page.url())
   const deadline = Date.now() + timeoutSec * 1000
   let acted = false // set once we submitted any credential (gates blocker aborts)
-  let authRecoveryAttempts = 0
-  let chatgptPasswordSubmits = 0
+  const authAttempt = createOpenAiAuthAttempt()
   while (Date.now() < deadline) {
     if (await isLoggedIn(page)) return true
     const url = page.url()
     const body = await pageBodyText(page)
 
-    if (isAuth0ErrorPage(body)) {
-      if (authRecoveryAttempts >= 3) {
-        throw new Error('Auth0 Route Error lặp lại sau 3 lần recovery. Chạy `chatgpt-review logout` rồi login lại để tạo profile sạch.')
-      }
-      authRecoveryAttempts++
-      console.error(`[bridge] Auth0 Route Error — restart login transaction (lần ${authRecoveryAttempts}/3)…`)
+    if (isRecoverableOpenAiRouteError(body, url)) {
+      if (!claimRouteRecovery(authAttempt)) throw new Error(ROUTE_RECOVERY_EXHAUSTED_MESSAGE)
+      console.error(`[bridge] Auth0 Route Error — restart login transaction (lần ${authAttempt.recoveries}/3)…`)
       await restartChatgptLoginFlow(page)
       acted = false
-      chatgptPasswordSubmits = 0
       await sleep(1200)
       continue
     }
@@ -853,18 +835,9 @@ async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150 } = {}) {
       }
       if (await anyRealVisible(page, GOOGLE_PW_INPUT)) {
         console.error('[bridge] Google password screen…')
-        const startUrl = page.url()
-        if (!(await fillFieldAndSubmit(page, GOOGLE_PW_INPUT, creds.password, GOOGLE_PW_NEXT, 8000))) {
-          throw new Error('Không tìm thấy password field/submit button của Google.')
-        }
-        acted = true
-        const settled = await waitForCredentialSubmitSettled(page, GOOGLE_PW_INPUT, startUrl)
-        if (settled.state === 'logged-in' || settled.state === 'navigated') continue
-        if (settled.state === 'auth0-error') continue
-        if (settled.state === 'blocker') throw new Error(settled.message)
-        if (settled.state === 'closed') throw new Error('Browser/page đã bị đóng giữa chừng.')
-        if (settled.state === 'timeout') throw new Error('Google password submit treo quá 60s; không tự submit lại để tránh duplicate auth transaction.')
-        throw new Error('Google password submit đã kết thúc nhưng vẫn ở cùng màn hình; dừng thay vì tự submit password lần nữa.')
+        if (await fillFieldAndSubmit(page, GOOGLE_PW_INPUT, creds.password, GOOGLE_PW_NEXT, 8000)) acted = true
+        await page.waitForTimeout(3000)
+        continue
       }
       if (await anyRealVisible(page, GOOGLE_ID_INPUT)) {
         console.error('[bridge] Google identifier screen…')
@@ -879,22 +852,21 @@ async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150 } = {}) {
     if (onAuthHost()) {
       if (await anyRealVisible(page, CHATGPT_PASSWORD_INPUT)) {
         console.error('[bridge] ChatGPT password screen…')
+        if (!claimPasswordSubmit(authAttempt)) {
+          throw new Error('Password đã được submit một lần trong auth transaction hiện tại; dừng để tránh duplicate/stale Auth0 transaction.')
+        }
         const startUrl = page.url()
         if (!(await fillFieldAndSubmit(page, CHATGPT_PASSWORD_INPUT, creds.password, CHATGPT_CONTINUE_BTN, 8000))) {
           throw new Error('Không tìm thấy ChatGPT password field/submit button.')
         }
         acted = true
-        chatgptPasswordSubmits++
-        if (chatgptPasswordSubmits > 1) {
-          throw new Error('Password đã được submit một lần nhưng vẫn quay lại cùng màn hình; dừng để tránh tạo duplicate/stale Auth0 transaction.')
-        }
-        const settled = await waitForCredentialSubmitSettled(page, CHATGPT_PASSWORD_INPUT, startUrl)
+        const settled = await waitForChatgptPasswordSubmit(page, startUrl)
         if (settled.state === 'logged-in' || settled.state === 'navigated') continue
         if (settled.state === 'auth0-error') continue
         if (settled.state === 'blocker') throw new Error(settled.message)
         if (settled.state === 'closed') throw new Error('Browser/page đã bị đóng giữa chừng.')
         if (settled.state === 'timeout') throw new Error('ChatGPT password submit treo quá 60s; không tự submit lại để tránh duplicate Auth0 transaction.')
-        throw new Error('Password submit đã kết thúc nhưng vẫn ở cùng màn hình; dừng thay vì tự submit password lần nữa. Hãy thử login thủ công.')
+        throw new Error('ChatGPT password submit không có tiến triển sau 25s; dừng thay vì tự submit password lần nữa. Hãy thử login thủ công.')
       }
       if (await anyRealVisible(page, CHATGPT_EMAIL_INPUT)) {
         if (await fillFieldAndSubmit(page, CHATGPT_EMAIL_INPUT, creds.email, CHATGPT_CONTINUE_BTN, 6000)) acted = true
@@ -1116,7 +1088,7 @@ async function doLogin() {
     console.error('[switch] already logged in — waiting for you to log out and log in with the other account...')
   }
 
-  let manualAuthRecoveries = 0
+  const manualAuthAttempt = createOpenAiAuthAttempt()
   for (let i = 0; i < 600; i++) {
     if (browserClosed) {
       console.error('Browser was closed by user.')
@@ -1187,21 +1159,27 @@ async function doLogin() {
       }
     } catch {}
 
-    try {
-      const body = await pageBodyText(page)
-      if (isAuth0ErrorPage(body)) {
-        if (manualAuthRecoveries >= 3) {
-          console.error('[bridge] Auth0 Route Error vẫn lặp lại sau 3 lần recovery. Đóng browser và chạy `chatgpt-review logout` rồi `chatgpt-review login` để tạo profile sạch.')
-          await sleep(2000)
-          continue
-        }
-        manualAuthRecoveries++
-        console.error(`[bridge] Auth0 Route Error — tự restart login flow (lần ${manualAuthRecoveries}/3)…`)
-        await restartChatgptLoginFlow(page)
-        await sleep(1000)
-        continue
+    let routeError = false
+    try { routeError = isRecoverableOpenAiRouteError(await pageBodyText(page), page.url()) } catch {}
+    if (routeError) {
+      if (!claimRouteRecovery(manualAuthAttempt)) {
+        console.error(`[bridge] ${ROUTE_RECOVERY_EXHAUSTED_MESSAGE}`)
+        try { await ctx.close() } catch {}
+        process.exitCode = 1
+        return
       }
-    } catch {}
+      console.error(`[bridge] Auth0 Route Error — tự restart login flow (lần ${manualAuthAttempt.recoveries}/3)…`)
+      try {
+        await restartChatgptLoginFlow(page)
+      } catch (e) {
+        console.error(`[bridge] Không thể restart ChatGPT login flow: ${e.message}`)
+        try { await ctx.close() } catch {}
+        process.exitCode = 1
+        return
+      }
+      await sleep(1000)
+      continue
+    }
 
     await sleep(2000)
   }
