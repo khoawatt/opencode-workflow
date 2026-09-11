@@ -16,6 +16,9 @@ bash -n "$REPO_ROOT/bin/opencode-work" "$REPO_ROOT/install.sh" \
 bash -n "$REPO_ROOT/bin/chatgpt-review" "$REPO_ROOT/bin/gemini-review" 2>/dev/null || true
 node --check "$REPO_ROOT/bin/chatgpt-review.mjs"
 node --check "$REPO_ROOT/bin/gemini-review.mjs"
+grep -q "isAuth0ErrorPage" "$REPO_ROOT/bin/chatgpt-review.mjs" || fail "chatgpt bridge missing Auth0 Route Error detection"
+grep -q "restartChatgptLoginFlow" "$REPO_ROOT/bin/chatgpt-review.mjs" || fail "chatgpt bridge missing Auth0 login-flow restart helper"
+grep -q "authRecoveryAttempts < 3" "$REPO_ROOT/bin/chatgpt-review.mjs" || fail "manual chatgpt login missing bounded Auth0 recovery"
 if [[ -f "$REPO_ROOT/bin/session-auth.mjs" ]]; then
   node --check "$REPO_ROOT/bin/session-auth.mjs"
 fi
