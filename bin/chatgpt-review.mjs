@@ -12,6 +12,7 @@ import {
   claimRouteRecovery,
   createOpenAiAuthAttempt,
   detectOpenAiAuthBlocker as detectChatgptBlocker,
+  isInteractiveOpenAiChallenge,
   isOpenAiAuthTransactionCookie,
   isOpenAiAuthUrl,
   isRecoverableOpenAiRouteError,
@@ -770,12 +771,29 @@ const OPENAI_CODE_INPUT = [
   'input[name="code"]',
 ]
 
+async function waitForInteractiveAuth(page, { timeoutSec = 1200, reason = 'verification' } = {}) {
+  console.error(`[bridge] ${reason} cần thao tác thủ công — browser vẫn mở, hãy hoàn tất bước xác minh trong cửa sổ (tối đa ${Math.round(timeoutSec / 60)} phút)…`)
+  const deadline = Date.now() + timeoutSec * 1000
+  while (Date.now() < deadline) {
+    if (page.isClosed && page.isClosed()) return { state: 'closed' }
+    if (await isLoggedIn(page)) return { state: 'logged-in' }
+
+    const url = page.url()
+    const body = await pageBodyText(page)
+    if (isRecoverableOpenAiRouteError(body, url)) return { state: 'auth0-error' }
+
+    await sleep(1000)
+  }
+  return { state: 'timeout' }
+}
+
 // Fill email+password from .env and submit. Handles three login shapes:
 //  1. chatgpt.com "Log in" modal (email) → 2a or 2b
 //  2a. auth.openai.com password screen (email+password accounts)
 //  2b. Google OAuth (Google-linked accounts): identifier → password → consent
-// Throws with a human-readable message when a manual step is required.
-async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150 } = {}) {
+// When allowInteractive=true (used by `login --auto`), verification/CAPTCHA
+// falls back to a manual wait in the same browser instead of closing it.
+async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150, allowInteractive = false, interactiveTimeoutSec = 1200 } = {}) {
   if (await isLoggedIn(page)) return true
   console.error(`[bridge] auto-login as ${maskEmail(creds.email)} (from ${creds.emailSource === 'env' ? 'env' : creds.envPath})…`)
   await page.goto(CHAT_URL, { waitUntil: 'domcontentloaded', timeout: 60000 })
@@ -817,11 +835,33 @@ async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150 } = {}) {
           continue
         }
       } catch {}
+      if (allowInteractive) {
+        const interactive = await waitForInteractiveAuth(page, {
+          timeoutSec: interactiveTimeoutSec,
+          reason: 'ChatGPT đang chờ mã xác minh',
+        })
+        if (interactive.state === 'logged-in') return true
+        if (interactive.state === 'auth0-error') continue
+        if (interactive.state === 'closed') throw new Error('Browser/page đã bị đóng trong lúc chờ nhập mã xác minh.')
+        throw new Error(`Hết thời gian chờ nhập mã xác minh (${interactiveTimeoutSec}s).`)
+      }
       throw new Error('ChatGPT gửi mã xác minh về email (tài khoản chưa có password) — nhập mã thủ công 1 lần (`login`), hoặc bấm "Continue with password" trong bản web. Auto-login không đọc được inbox.')
     }
 
     const blocker = detectChatgptBlocker(body, url)
-    if (blocker && acted) throw new Error(blocker)
+    if (blocker && acted) {
+      if (allowInteractive && isInteractiveOpenAiChallenge(body, url)) {
+        const interactive = await waitForInteractiveAuth(page, {
+          timeoutSec: interactiveTimeoutSec,
+          reason: 'ChatGPT yêu cầu xác minh/2FA/CAPTCHA',
+        })
+        if (interactive.state === 'logged-in') return true
+        if (interactive.state === 'auth0-error') continue
+        if (interactive.state === 'closed') throw new Error('Browser/page đã bị đóng trong lúc chờ xác minh.')
+        throw new Error(`Hết thời gian chờ xác minh thủ công (${interactiveTimeoutSec}s).`)
+      }
+      throw new Error(blocker)
+    }
 
     if (onGoogle()) {
       // Google consent screen (has Allow button) takes precedence — the
@@ -863,7 +903,23 @@ async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150 } = {}) {
         const settled = await waitForChatgptPasswordSubmit(page, startUrl)
         if (settled.state === 'logged-in' || settled.state === 'navigated') continue
         if (settled.state === 'auth0-error') continue
-        if (settled.state === 'blocker') throw new Error(settled.message)
+        if (settled.state === 'blocker') {
+          if (allowInteractive) {
+            const currentBody = await pageBodyText(page)
+            const currentUrl = page.url()
+            if (isInteractiveOpenAiChallenge(currentBody, currentUrl)) {
+              const interactive = await waitForInteractiveAuth(page, {
+                timeoutSec: interactiveTimeoutSec,
+                reason: 'ChatGPT yêu cầu xác minh sau khi submit password',
+              })
+              if (interactive.state === 'logged-in') return true
+              if (interactive.state === 'auth0-error') continue
+              if (interactive.state === 'closed') throw new Error('Browser/page đã bị đóng trong lúc chờ xác minh.')
+              throw new Error(`Hết thời gian chờ xác minh thủ công (${interactiveTimeoutSec}s).`)
+            }
+          }
+          throw new Error(settled.message)
+        }
         if (settled.state === 'closed') throw new Error('Browser/page đã bị đóng giữa chừng.')
         if (settled.state === 'timeout') throw new Error('ChatGPT password submit treo quá 60s; không tự submit lại để tránh duplicate Auth0 transaction.')
         throw new Error('ChatGPT password submit không có tiến triển sau 25s; dừng thay vì tự submit password lần nữa. Hãy thử login thủ công.')
@@ -1037,7 +1093,7 @@ async function doLogin() {
     const ctx = await launchPersistent(headful)
     const page = ctx.pages()[0] || (await ctx.newPage())
     try {
-      await tryAutoLoginChatGPT(page, creds, { timeoutSec: loginTimeout })
+      await tryAutoLoginChatGPT(page, creds, { timeoutSec: loginTimeout, allowInteractive: true, interactiveTimeoutSec: 1200 })
       console.error('LOGIN OK — session saved (auto-login from .env).')
       await ctx.close()
       return
