@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, openSync, writeSync, closeSync, unlinkSync, renameSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, openSync, writeSync, closeSync, unlinkSync, renameSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, basename } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
@@ -103,6 +103,7 @@ Reuses one conversation per repo+branch; creates a new one when the context gets
 
 USAGE:
   chatgpt-review.mjs login [--auto] [--switch] [--wait=SECONDS]   Sign in (manual once, or --auto from .env).
+  chatgpt-review.mjs logout [--clear-chats] [--clear-all]       Sign out: delete the saved browser session (profile/).
   chatgpt-review.mjs ask            Read prompt from stdin (or --file=FILE), send to ChatGPT, print reply.
   chatgpt-review.mjs status         Check whether a signed-in profile exists.
   chatgpt-review.mjs chats          List per-repo conversation state.
@@ -122,6 +123,12 @@ LOGIN OPTIONS:
   --keep-open / --stay-open   Alias for --switch.
   --headless / --headful       Browser visibility for login (default headful; headless may hit Cloudflare).
   --timeout=SECONDS     Max seconds to wait for auto-login (default 120).
+
+LOGOUT OPTIONS:
+  --clear-chats         Also delete chats.json (per-repo conversation mapping
+                        from the old account; its chat IDs no longer open).
+  --clear-all           --clear-chats plus delete projects.json (old account's
+                        attached ChatGPT Projects).
 
 OPTIONS (for ask):
   --file=FILE        Read the prompt from FILE instead of stdin.
@@ -1082,6 +1089,40 @@ async function doLogin() {
   process.exit(1)
 }
 
+async function doLogout() {
+  const logoutArgs = args.slice(1)
+  const has = (flag) => logoutArgs.includes(flag)
+  if (has('--help') || has('-h')) {
+    console.error(`
+USAGE:
+  chatgpt-review.mjs logout [--clear-chats] [--clear-all]
+
+  Deletes the saved browser session (profile/) so the old account is signed
+  out. Does NOT touch .env credentials.
+
+  --clear-chats         Also delete chats.json (old account's per-repo threads).
+  --clear-all           --clear-chats plus delete projects.json (old account's
+                        attached ChatGPT Projects).
+  Afterwards run 'login' (or 'login --switch') to sign in with another account.
+`)
+    return
+  }
+  const clearChats = has('--clear-chats') || has('--clear-all')
+  const clearProjects = has('--clear-all') || has('--clear-projects')
+  const hadProfile = existsSync(PROFILE_DIR)
+  let chatsRemoved = false
+  let projectsRemoved = false
+  if (hadProfile) rmSync(PROFILE_DIR, { recursive: true, force: true })
+  if (clearChats && existsSync(STATE_FILE)) { rmSync(STATE_FILE, { force: true }); chatsRemoved = true }
+  if (clearProjects && existsSync(PROJECTS_FILE)) { rmSync(PROJECTS_FILE, { force: true }); projectsRemoved = true }
+  if (!hadProfile) console.error('No saved session (profile/ not found) — already logged out.')
+  else {
+    console.error('LOGOUT OK — saved browser session deleted. Run `chatgpt-review login` to sign in again.')
+    if (!clearChats) console.error('Note: chats.json kept (old chat IDs belong to the old account and will start fresh on next ask). Use --clear-chats to wipe it.')
+  }
+  console.log(JSON.stringify({ loggedOut: true, profileRemoved: hadProfile, chatsRemoved, projectsRemoved }))
+}
+
 async function doAsk() {
   let prompt = ''
   let timeoutSec = 300
@@ -1426,6 +1467,7 @@ function withLock(fn) {
 }
 
 if (mode === 'login') { await withLock(doLogin)() }
+else if (mode === 'logout') { await withLock(doLogout)() }
 else if (mode === 'ask') { await withLock(doAsk)() }
 else if (mode === 'status') { await withLock(doStatus)() }
 else if (mode === 'chats') { await doChats() }
