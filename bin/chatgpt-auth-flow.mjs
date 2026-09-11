@@ -14,6 +14,13 @@ export function isAuth0RouteError(bodyText) {
   return /oops,? an error occurred|route error|invalid content type/i.test(bodyText || '')
 }
 
+export function isInteractiveOpenAiChallenge(bodyText, url) {
+  const body = String(bodyText || '').toLowerCase()
+  const interactiveText = /verify you are human|captcha|challenge|two-?factor|2fa|multi-?factor|mfa|authenticator|verification code|check your email|we sent you|enter.*code|one-time-code|one time code|otp/.test(body)
+  const challengeUrl = /__cf_chl|challenges\.cloudflare/.test(String(url || ''))
+  return interactiveText || challengeUrl
+}
+
 export function detectOpenAiAuthBlocker(bodyText, url) {
   if (!bodyText) return null
   bodyText = String(bodyText).toLowerCase()
