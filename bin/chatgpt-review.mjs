@@ -804,7 +804,7 @@ async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150 } = {}) {
   const deadline = Date.now() + timeoutSec * 1000
   let acted = false // set once we submitted any credential (gates blocker aborts)
   let authRecoveryAttempts = 0
-  let passwordSubmits = 0
+  let chatgptPasswordSubmits = 0
   while (Date.now() < deadline) {
     if (await isLoggedIn(page)) return true
     const url = page.url()
@@ -818,7 +818,7 @@ async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150 } = {}) {
       console.error(`[bridge] Auth0 Route Error — restart login transaction (lần ${authRecoveryAttempts}/3)…`)
       await restartChatgptLoginFlow(page)
       acted = false
-      passwordSubmits = 0
+      chatgptPasswordSubmits = 0
       await sleep(1200)
       continue
     }
@@ -858,7 +858,6 @@ async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150 } = {}) {
           throw new Error('Không tìm thấy password field/submit button của Google.')
         }
         acted = true
-        passwordSubmits++
         const settled = await waitForCredentialSubmitSettled(page, GOOGLE_PW_INPUT, startUrl)
         if (settled.state === 'logged-in' || settled.state === 'navigated') continue
         if (settled.state === 'auth0-error') continue
@@ -885,8 +884,8 @@ async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150 } = {}) {
           throw new Error('Không tìm thấy ChatGPT password field/submit button.')
         }
         acted = true
-        passwordSubmits++
-        if (passwordSubmits > 1) {
+        chatgptPasswordSubmits++
+        if (chatgptPasswordSubmits > 1) {
           throw new Error('Password đã được submit một lần nhưng vẫn quay lại cùng màn hình; dừng để tránh tạo duplicate/stale Auth0 transaction.')
         }
         const settled = await waitForCredentialSubmitSettled(page, CHATGPT_PASSWORD_INPUT, startUrl)
