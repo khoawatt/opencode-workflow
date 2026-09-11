@@ -596,6 +596,37 @@ function detectChatgptBlocker(bodyText, url) {
   return null
 }
 
+// Auth0 may render this generic 400 when the login transaction is stale,
+// expired, or resumed with mismatched transaction state.
+const isAuth0ErrorPage = (bodyText) =>
+  /oops,? an error occurred|route error|invalid content type/.test(bodyText || '')
+
+// Drop only Auth0/OpenAI auth transaction cookies. Keep the persistent browser
+// profile and unrelated cookies so Google/ChatGPT sessions are not wiped.
+async function clearAuthTransaction(page) {
+  try {
+    if (page.isClosed && page.isClosed()) return
+    const ctx = page.context()
+    const all = await ctx.cookies()
+    for (const cookie of all) {
+      const domain = cookie.domain || ''
+      const name = cookie.name || ''
+      if (/auth0|auth\.openai/i.test(domain) || /^auth0/i.test(name)) {
+        try {
+          await ctx.clearCookies({ name: cookie.name, domain: cookie.domain, path: cookie.path })
+        } catch {}
+      }
+    }
+  } catch {}
+}
+
+async function restartChatgptLoginFlow(page) {
+  if (page.isClosed && page.isClosed()) throw new Error('browser/page already closed')
+  await clearAuthTransaction(page)
+  await page.goto(CHAT_URL, { waitUntil: 'domcontentloaded', timeout: 60000 })
+  await handleCloudflare(page)
+}
+
 const CHATGPT_LOGIN_BTN = [
   'button[data-testid="login-button"]',
   'a[data-testid="login-button"]',
@@ -733,6 +764,18 @@ async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150 } = {}) {
     if (await isLoggedIn(page)) return true
     const url = page.url()
     const body = await pageBodyText(page)
+
+    if (isAuth0ErrorPage(body)) {
+      console.error('[bridge] trang lỗi Auth0 (Route Error / transaction hỏng) — xóa auth transaction và bắt đầu lại login flow…')
+      acted = false
+      try {
+        await restartChatgptLoginFlow(page)
+      } catch (e) {
+        throw new Error(`Không thể restart ChatGPT login flow sau Auth0 Route Error: ${e.message}`)
+      }
+      await sleep(1500)
+      continue
+    }
 
     // Email-code screen (unknown email): prefer password login when offered.
     if (await anyRealVisible(page, OPENAI_CODE_INPUT)) {
@@ -1006,6 +1049,8 @@ async function doLogin() {
     console.error('[switch] already logged in — waiting for you to log out and log in with the other account...')
   }
 
+  let authRecoveryAttempts = 0
+  let authErrNotified = false
   for (let i = 0; i < 600; i++) {
     if (browserClosed) {
       console.error('Browser was closed by user.')
@@ -1075,6 +1120,36 @@ async function doLogin() {
         }
       }
     } catch {}
+
+    // A stale Auth0 transaction never recovers by waiting. In manual login,
+    // restart the transaction automatically but keep retries bounded so a
+    // persistent server-side problem does not loop forever.
+    if (i % 5 === 0 && !browserClosed) {
+      try {
+        const body = await pageBodyText(page)
+        if (isAuth0ErrorPage(body)) {
+          if (authRecoveryAttempts < 3) {
+            authRecoveryAttempts++
+            console.error(`[bridge] Auth0 Route Error — tự restart login flow (lần ${authRecoveryAttempts}/3)…`)
+            try {
+              await restartChatgptLoginFlow(page)
+              authErrNotified = false
+              await sleep(1000)
+              continue
+            } catch (e) {
+              console.error(`[bridge] restart login flow thất bại: ${e.message}`)
+            }
+          }
+          if (!authErrNotified) {
+            console.error('[bridge] Auth0 vẫn lỗi sau 3 lần recovery — đóng browser rồi chạy `chatgpt-review logout` + `chatgpt-review login` để tạo profile sạch; không F5/back giữa flow.')
+            authErrNotified = true
+          }
+        } else {
+          authErrNotified = false
+        }
+      } catch {}
+    }
+
     await sleep(2000)
   }
   console.error('Timed out waiting for login (20 min). Session not saved.')
