@@ -47,6 +47,10 @@ assert.equal(auth.isRecoverableOpenAiRouteError('Oops, an error occurred', 'http
 assert.match(auth.detectOpenAiAuthBlocker('Incorrect password', 'https://auth.openai.com/'), /email\/password/)
 assert.match(auth.detectOpenAiAuthBlocker('Enter your verification code', 'https://auth.openai.com/'), /2FA/)
 assert.equal(auth.detectOpenAiAuthBlocker('', 'https://auth.openai.com/'), null)
+assert.equal(auth.isInteractiveOpenAiChallenge('Enter your verification code', 'https://auth.openai.com/'), true)
+assert.equal(auth.isInteractiveOpenAiChallenge('Verify you are human', 'https://auth.openai.com/'), true)
+assert.equal(auth.isInteractiveOpenAiChallenge('', 'https://example.com/?__cf_chl=1'), true)
+assert.equal(auth.isInteractiveOpenAiChallenge('Incorrect password', 'https://auth.openai.com/'), false)
 
 const attempt = auth.createOpenAiAuthAttempt()
 assert.equal(auth.claimPasswordSubmit(attempt), true)
@@ -105,6 +109,9 @@ assert.equal(auth.isOpenAiAuthUrl('https://chatgpt.com/'), false)
 assert.equal(auth.isOpenAiAuthUrl('https://auth0.com.evil.example/'), false)
 assert.equal(auth.isOpenAiAuthUrl('https://notauth0.com/'), false)
 EOF
+
+grep -q "allowInteractive: true" "$REPO_ROOT/bin/chatgpt-review.mjs" || fail "login --auto does not enable interactive verification fallback"
+grep -q "interactiveTimeoutSec: 1200" "$REPO_ROOT/bin/chatgpt-review.mjs" || fail "login --auto interactive verification window is not 20 minutes"
 # .env must never be committed; examples must exist
 grep -Eq '^\.env$' "$REPO_ROOT/.gitignore" || fail ".gitignore missing .env rule"
 [[ -f "$REPO_ROOT/config/chatgpt-bridge.env.example" ]] || fail "chatgpt .env example missing"
