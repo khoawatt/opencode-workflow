@@ -729,7 +729,13 @@ async function waitForChatgptPasswordSubmit(page, startUrl) {
       if (isRecoverableOpenAiRouteError(body, url)) return { state: 'auth0-error' }
 
       const blocker = detectChatgptBlocker(body, url)
-      if (blocker) return { state: 'blocker', message: blocker }
+      if (blocker) {
+        return {
+          state: 'blocker',
+          message: blocker,
+          interactive: isInteractiveOpenAiChallenge(body, url),
+        }
+      }
       if (url !== startUrl || !(await anyRealVisible(page, CHATGPT_PASSWORD_INPUT))) {
         return { state: 'navigated' }
       }
@@ -904,19 +910,19 @@ async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150, allowInterac
         if (settled.state === 'logged-in' || settled.state === 'navigated') continue
         if (settled.state === 'auth0-error') continue
         if (settled.state === 'blocker') {
-          if (allowInteractive) {
-            const currentBody = await pageBodyText(page)
-            const currentUrl = page.url()
-            if (isInteractiveOpenAiChallenge(currentBody, currentUrl)) {
-              const interactive = await waitForInteractiveAuth(page, {
-                timeoutSec: interactiveTimeoutSec,
-                reason: 'ChatGPT yêu cầu xác minh sau khi submit password',
-              })
-              if (interactive.state === 'logged-in') return true
-              if (interactive.state === 'auth0-error') continue
-              if (interactive.state === 'closed') throw new Error('Browser/page đã bị đóng trong lúc chờ xác minh.')
-              throw new Error(`Hết thời gian chờ xác minh thủ công (${interactiveTimeoutSec}s).`)
-            }
+          // IMPORTANT: use the classification captured at the exact moment the
+          // blocker was observed. Re-reading the page here is racy: Auth0/CF can
+          // replace or blank the challenge DOM between polls, which previously
+          // made an interactive CAPTCHA/verification fall through and abort.
+          if (allowInteractive && settled.interactive) {
+            const interactive = await waitForInteractiveAuth(page, {
+              timeoutSec: interactiveTimeoutSec,
+              reason: 'ChatGPT yêu cầu xác minh sau khi submit password',
+            })
+            if (interactive.state === 'logged-in') return true
+            if (interactive.state === 'auth0-error') continue
+            if (interactive.state === 'closed') throw new Error('Browser/page đã bị đóng trong lúc chờ xác minh.')
+            throw new Error(`Hết thời gian chờ xác minh thủ công (${interactiveTimeoutSec}s).`)
           }
           throw new Error(settled.message)
         }
