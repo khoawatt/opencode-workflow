@@ -5,6 +5,25 @@ import { join, basename } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { loadBridgeCreds, credsHelp, maskEmail, resolveBridgeDir, CHATGPT_KEYS } from './bridge-env.mjs'
+import {
+  ROUTE_RECOVERY_EXHAUSTED_MESSAGE,
+  OPENAI_AUTH_TRANSACTION_STORAGE_KEY_PATTERN,
+  TOTP_MIN_WINDOW_REMAINING_MS,
+  base32Decode,
+  claimPasswordSubmit,
+  claimRouteRecovery,
+  claimTotpSubmit,
+  createOpenAiAuthAttempt,
+  detectOpenAiAuthBlocker as detectChatgptBlocker,
+  isInteractiveOpenAiChallenge,
+  isOpenAiAuthenticatorChallenge,
+  isOpenAiAuthTransactionCookie,
+  isOpenAiAuthUrl,
+  isRecoverableOpenAiRouteError,
+  totpCode,
+  totpMsRemainingInWindow,
+  waitForOpenAiPasswordOutcome,
+} from './chatgpt-auth-flow.mjs'
 const require = createRequire(import.meta.url)
 let chromium
 try { ({ chromium } = require('playwright')) } catch { try { const r2=createRequire(join(homedir(),'.config/opencode/chatgpt-bridge/package.json')); ({ chromium } = r2('playwright')) } catch { const r3=createRequire(join(homedir(),'.config/opencode/gemini-bridge/package.json')); ({ chromium } = r3('playwright')) } }
@@ -513,6 +532,7 @@ function loadChatgptCreds() {
     envFileVar: 'CHATGPT_ENV_FILE',
     emailKeys: CHATGPT_KEYS.emailKeys,
     passwordKeys: CHATGPT_KEYS.passwordKeys,
+    totpKeys: CHATGPT_KEYS.totpKeys,
   })
 }
 
@@ -580,27 +600,36 @@ async function pageBodyText(page) {
   }
 }
 
-function detectChatgptBlocker(bodyText, url) {
-  if (!bodyText) return null
-  if (/wrong (email|password)|incorrect.*password|invalid.*credentials|wrong.*credentials/.test(bodyText)) {
-    return 'ChatGPT báo sai email/password — kiểm tra lại .env rồi thử lại.'
+async function clearAuthTransaction(page) {
+  if (page.isClosed && page.isClosed()) return
+  const ctx = page.context()
+  const cookies = await ctx.cookies()
+  for (const cookie of cookies) {
+    if (isOpenAiAuthTransactionCookie(cookie)) {
+      await ctx.clearCookies({ name: cookie.name, domain: cookie.domain, path: cookie.path })
+    }
   }
-  if (/verify you are human|captcha|challenge|unusual activity|suspicious|verify.*identity/.test(bodyText)) {
-    return 'ChatGPT yêu cầu xác minh người thật (CAPTCHA/Cloudflare) — hoàn thành 1 lần bằng `login` thủ công, các lần sau dùng session đã lưu.'
+
+  // Browser storage is origin-scoped. Only remove transient Auth0/OpenAI
+  // transaction entries from the current auth origin; ChatGPT and Google
+  // profile/session state remain untouched.
+  if (isOpenAiAuthUrl(page.url())) {
+    await page.evaluate((keyPattern) => {
+      const transactionKey = new RegExp(keyPattern, 'i')
+      for (const storage of [sessionStorage, localStorage]) {
+        for (const key of Object.keys(storage)) {
+          if (transactionKey.test(key)) storage.removeItem(key)
+        }
+      }
+    }, OPENAI_AUTH_TRANSACTION_STORAGE_KEY_PATTERN).catch(() => {})
   }
-  if (/two-?factor|2fa|multi-?factor|mfa|authenticator|verification code|check your email|we sent you|enter.*code/.test(bodyText)) {
-    return 'Tài khoản bật 2FA/mã xác minh qua email — auto-login không thể tự qua bước này. Đăng nhập thủ công 1 lần (`login`), session sẽ được tái dùng.'
-  }
-  if (/this browser or app may not be secure|browser.*not.*secure|couldn.t sign you in/.test(bodyText)) {
-    return 'ChatGPT/Google chặn trình duyệt tự động — đăng nhập thủ công 1 lần (`login`) để lưu session.'
-  }
-  if (/rate.?limit|too many (attempts|requests)|try again later/.test(bodyText)) {
-    return 'Bị giới hạn số lần đăng nhập — đợi vài phút rồi thử lại.'
-  }
-  if (url.includes('__cf_chl') || url.includes('challenges.cloudflare')) {
-    return 'Đang kẹt ở Cloudflare challenge — thử lại ở môi trường có display (headful) hoặc login thủ công 1 lần.'
-  }
-  return null
+}
+
+async function restartChatgptLoginFlow(page) {
+  if (page.isClosed && page.isClosed()) throw new Error('browser/page already closed')
+  await clearAuthTransaction(page)
+  await page.goto(CHAT_URL, { waitUntil: 'domcontentloaded', timeout: 60000 })
+  await handleCloudflare(page)
 }
 
 const CHATGPT_LOGIN_BTN = [
@@ -687,6 +716,45 @@ async function anyRealVisible(page, selectors) {
   return false
 }
 
+const AUTH_SUBMIT_BUSY_SELECTORS = [
+  'button[type="submit"][disabled]',
+  'button[aria-busy="true"]',
+  'button[type="submit"] [class*="spinner"]',
+  'button[type="submit"] [class*="loading"]',
+  'button[type="submit"] [class*="animate-spin"]',
+]
+
+async function waitForChatgptPasswordSubmit(page, startUrl) {
+  return waitForOpenAiPasswordOutcome({
+    wait: sleep,
+    observe: async () => {
+      if (page.isClosed && page.isClosed()) return { state: 'closed' }
+      if (await isLoggedIn(page)) return { state: 'logged-in' }
+
+      const url = page.url()
+      const body = await pageBodyText(page)
+      if (isRecoverableOpenAiRouteError(body, url)) return { state: 'auth0-error' }
+
+      const blocker = detectChatgptBlocker(body, url)
+      if (blocker) {
+        return {
+          state: 'blocker',
+          message: blocker,
+          interactive: isInteractiveOpenAiChallenge(body, url),
+        }
+      }
+      if (url !== startUrl || !(await anyRealVisible(page, CHATGPT_PASSWORD_INPUT))) {
+        return { state: 'navigated' }
+      }
+
+      return {
+        state: 'pending',
+        busy: await anyRealVisible(page, AUTH_SUBMIT_BUSY_SELECTORS),
+      }
+    },
+  })
+}
+
 const GOOGLE_ID_INPUT = [
   '#identifierId',
   'input[name="identifier"]',
@@ -715,13 +783,98 @@ const OPENAI_CODE_INPUT = [
   'input[autocomplete="one-time-code"]',
   'input[name="code"]',
 ]
+const MFA_SUBMIT_BTNS = [
+  'button[type="submit"]',
+  'button:has-text("Verify")',
+  'button:has-text("Continue")',
+]
+
+// Observe one TOTP submit for up to 25s. Returns 'logged-in' | 'auth0-error' |
+// 'rate-limited' | 'wrong-code' | 'changed' (left the MFA screen without a
+// verdict) | 'timeout' (no signal at all).
+async function observeTotpOutcome(page, timeoutMs = 25000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    await sleep(1000)
+    try {
+      if (await isLoggedIn(page)) return 'logged-in'
+      const u = page.url()
+      const b = await pageBodyText(page)
+      if (isRecoverableOpenAiRouteError(b, u)) return 'auth0-error'
+      if (/rate.?limit|too many|429/.test(b)) return 'rate-limited'
+      if (/incorrect|invalid.*code|wrong.*code|code expired|try again/.test(b)) return 'wrong-code'
+      const stillMfa = /\/mfa-challenge/.test(u) || await anyRealVisible(page, OPENAI_CODE_INPUT)
+      if (!stillMfa) return 'changed'
+    } catch {}
+  }
+  return 'timeout'
+}
+
+// Fully automatic TOTP submit using CHATGPT_TOTP_SECRET from .env.
+// Returns 'logged-in' | 'auth0-error' | 'changed' | 'manual'.
+// Invariants (audited): at most 2 submits (current counter + one retry with a
+// strictly advanced counter, enforced by claimTotpSubmit); never submit in
+// the last ~3s of a window (wait for a fresh one); never retry after
+// rate-limit; the code value is never logged.
+async function tryAutoTotpSubmit(page, creds, authAttempt) {
+  try {
+    base32Decode(creds.totpSecret)
+  } catch {
+    console.error('[bridge] CHATGPT_TOTP_SECRET không hợp lệ — bỏ qua auto-TOTP, chờ nhập tay…')
+    return 'manual'
+  }
+  let waitedForWindow = false
+  for (;;) {
+    // Re-confirm the state machine still shows an OpenAI authenticator
+    // challenge (the page may have moved on while we waited).
+    if (!isOpenAiAuthenticatorChallenge(await pageBodyText(page), page.url())) return 'changed'
+    const remaining = totpMsRemainingInWindow(Date.now())
+    if (remaining < TOTP_MIN_WINDOW_REMAINING_MS && !waitedForWindow) {
+      waitedForWindow = true
+      await sleep(remaining + 400)
+      continue
+    }
+    const { code, counter } = totpCode(creds.totpSecret, { timeMs: Date.now() })
+    if (!claimTotpSubmit(authAttempt, counter)) return 'manual'
+    console.error('[bridge] tự điền mã TOTP từ .env (mã không hiện trong log)…')
+    await fillFieldAndSubmit(page, OPENAI_CODE_INPUT, code, MFA_SUBMIT_BTNS, 8000)
+    const outcome = await observeTotpOutcome(page)
+    if (outcome === 'logged-in') return 'logged-in'
+    if (outcome === 'auth0-error') return 'auth0-error'
+    if (outcome === 'changed') return 'changed'
+    if (outcome === 'rate-limited') {
+      console.error('[bridge] bị rate-limit sau khi submit TOTP — dừng auto, chờ nhập tay…')
+      return 'manual'
+    }
+    // 'wrong-code' | 'timeout': loop once more with a fresh (advanced)
+    // counter; claimTotpSubmit blocks anything beyond the single retry.
+    await sleep(1500)
+  }
+}
+
+async function waitForInteractiveAuth(page, { timeoutSec = 1200, reason = 'verification' } = {}) {
+  console.error(`[bridge] ${reason} cần thao tác thủ công — browser vẫn mở, hãy hoàn tất bước xác minh trong cửa sổ (tối đa ${Math.round(timeoutSec / 60)} phút)…`)
+  const deadline = Date.now() + timeoutSec * 1000
+  while (Date.now() < deadline) {
+    if (page.isClosed && page.isClosed()) return { state: 'closed' }
+    if (await isLoggedIn(page)) return { state: 'logged-in' }
+
+    const url = page.url()
+    const body = await pageBodyText(page)
+    if (isRecoverableOpenAiRouteError(body, url)) return { state: 'auth0-error' }
+
+    await sleep(1000)
+  }
+  return { state: 'timeout' }
+}
 
 // Fill email+password from .env and submit. Handles three login shapes:
 //  1. chatgpt.com "Log in" modal (email) → 2a or 2b
 //  2a. auth.openai.com password screen (email+password accounts)
 //  2b. Google OAuth (Google-linked accounts): identifier → password → consent
-// Throws with a human-readable message when a manual step is required.
-async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150 } = {}) {
+// When allowInteractive=true (used by `login --auto`), verification/CAPTCHA
+// falls back to a manual wait in the same browser instead of closing it.
+async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150, allowInteractive = false, interactiveTimeoutSec = 1200 } = {}) {
   if (await isLoggedIn(page)) return true
   console.error(`[bridge] auto-login as ${maskEmail(creds.email)} (from ${creds.emailSource === 'env' ? 'env' : creds.envPath})…`)
   await page.goto(CHAT_URL, { waitUntil: 'domcontentloaded', timeout: 60000 })
@@ -736,10 +889,20 @@ async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150 } = {}) {
   const onAuthHost = () => /auth\.openai\.com|auth0\.com|accounts\.openai\.com/.test(page.url())
   const deadline = Date.now() + timeoutSec * 1000
   let acted = false // set once we submitted any credential (gates blocker aborts)
+  const authAttempt = createOpenAiAuthAttempt()
   while (Date.now() < deadline) {
     if (await isLoggedIn(page)) return true
     const url = page.url()
     const body = await pageBodyText(page)
+
+    if (isRecoverableOpenAiRouteError(body, url)) {
+      if (!claimRouteRecovery(authAttempt)) throw new Error(ROUTE_RECOVERY_EXHAUSTED_MESSAGE)
+      console.error(`[bridge] Auth0 Route Error — restart login transaction (lần ${authAttempt.recoveries}/3)…`)
+      await restartChatgptLoginFlow(page)
+      acted = false
+      await sleep(1200)
+      continue
+    }
 
     // Email-code screen (unknown email): prefer password login when offered.
     if (await anyRealVisible(page, OPENAI_CODE_INPUT)) {
@@ -753,11 +916,48 @@ async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150 } = {}) {
           continue
         }
       } catch {}
+      // Authenticator-app MFA + TOTP secret configured: fill automatically.
+      // The gate requires an OpenAI origin AND a positive authenticator
+      // classification AND no email-code signals (checked inside).
+      let totpManualFallback = false
+      if (creds.totpConfigured && isOpenAiAuthenticatorChallenge(body, url)) {
+        const auto = await tryAutoTotpSubmit(page, creds, authAttempt)
+        if (auto === 'logged-in') return true
+        if (auto === 'auth0-error' || auto === 'changed') continue
+        // 'manual' → fall through to the interactive wait below
+        // (explicit `login --auto` only; background `ask` fails fast).
+        totpManualFallback = true
+      }
+      if (allowInteractive) {
+        const interactive = await waitForInteractiveAuth(page, {
+          timeoutSec: interactiveTimeoutSec,
+          reason: 'ChatGPT đang chờ mã xác minh',
+        })
+        if (interactive.state === 'logged-in') return true
+        if (interactive.state === 'auth0-error') continue
+        if (interactive.state === 'closed') throw new Error('Browser/page đã bị đóng trong lúc chờ nhập mã xác minh.')
+        throw new Error(`Hết thời gian chờ nhập mã xác minh (${interactiveTimeoutSec}s).`)
+      }
+      if (totpManualFallback) {
+        throw new Error('Auto-TOTP thất bại (sai mã, hết lượt thử, hoặc secret không khớp) — nhập mã thủ công 1 lần (`login`), session sẽ được tái dùng. Kiểm tra CHATGPT_TOTP_SECRET trong .env và giờ hệ thống (NTP).')
+      }
       throw new Error('ChatGPT gửi mã xác minh về email (tài khoản chưa có password) — nhập mã thủ công 1 lần (`login`), hoặc bấm "Continue with password" trong bản web. Auto-login không đọc được inbox.')
     }
 
     const blocker = detectChatgptBlocker(body, url)
-    if (blocker && acted) throw new Error(blocker)
+    if (blocker && acted) {
+      if (allowInteractive && isInteractiveOpenAiChallenge(body, url)) {
+        const interactive = await waitForInteractiveAuth(page, {
+          timeoutSec: interactiveTimeoutSec,
+          reason: 'ChatGPT yêu cầu xác minh/2FA/CAPTCHA',
+        })
+        if (interactive.state === 'logged-in') return true
+        if (interactive.state === 'auth0-error') continue
+        if (interactive.state === 'closed') throw new Error('Browser/page đã bị đóng trong lúc chờ xác minh.')
+        throw new Error(`Hết thời gian chờ xác minh thủ công (${interactiveTimeoutSec}s).`)
+      }
+      throw new Error(blocker)
+    }
 
     if (onGoogle()) {
       // Google consent screen (has Allow button) takes precedence — the
@@ -788,10 +988,51 @@ async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150 } = {}) {
     if (onAuthHost()) {
       if (await anyRealVisible(page, CHATGPT_PASSWORD_INPUT)) {
         console.error('[bridge] ChatGPT password screen…')
-        if (await fillFieldAndSubmit(page, CHATGPT_PASSWORD_INPUT, creds.password, CHATGPT_CONTINUE_BTN, 8000)) acted = true
-        await page.waitForTimeout(3000)
-        await handleCloudflare(page)
-        continue
+        if (!claimPasswordSubmit(authAttempt)) {
+          throw new Error('Password đã được submit một lần trong auth transaction hiện tại; dừng để tránh duplicate/stale Auth0 transaction.')
+        }
+        const startUrl = page.url()
+        if (!(await fillFieldAndSubmit(page, CHATGPT_PASSWORD_INPUT, creds.password, CHATGPT_CONTINUE_BTN, 8000))) {
+          throw new Error('Không tìm thấy ChatGPT password field/submit button.')
+        }
+        acted = true
+        const settled = await waitForChatgptPasswordSubmit(page, startUrl)
+        if (settled.state === 'logged-in' || settled.state === 'navigated') continue
+        if (settled.state === 'auth0-error') continue
+        if (settled.state === 'blocker') {
+          // IMPORTANT: use the classification captured at the exact moment the
+          // blocker was observed. Re-reading the page here is racy: Auth0/CF can
+          // replace or blank the challenge DOM between polls, which previously
+          // made an interactive CAPTCHA/verification fall through and abort.
+          if (allowInteractive && settled.interactive) {
+            // Authenticator-app MFA with a configured TOTP secret: try fully
+            // automatic fill FIRST — the outer-loop code-input branch is never
+            // reached from here, so without this the flow would always wait
+            // for manual entry. Falls through to the manual wait on 'manual'.
+            try {
+              const b0 = await pageBodyText(page)
+              const u0 = page.url()
+              if (creds.totpConfigured && (await anyRealVisible(page, OPENAI_CODE_INPUT)) && isOpenAiAuthenticatorChallenge(b0, u0)) {
+                const auto = await tryAutoTotpSubmit(page, creds, authAttempt)
+                if (auto === 'logged-in') return true
+                if (auto === 'auth0-error') continue
+                // 'changed' | 'manual' → fall through to manual wait below.
+              }
+            } catch {}
+            const interactive = await waitForInteractiveAuth(page, {
+              timeoutSec: interactiveTimeoutSec,
+              reason: 'ChatGPT yêu cầu xác minh sau khi submit password',
+            })
+            if (interactive.state === 'logged-in') return true
+            if (interactive.state === 'auth0-error') continue
+            if (interactive.state === 'closed') throw new Error('Browser/page đã bị đóng trong lúc chờ xác minh.')
+            throw new Error(`Hết thời gian chờ xác minh thủ công (${interactiveTimeoutSec}s).`)
+          }
+          throw new Error(settled.message)
+        }
+        if (settled.state === 'closed') throw new Error('Browser/page đã bị đóng giữa chừng.')
+        if (settled.state === 'timeout') throw new Error('ChatGPT password submit treo quá 60s; không tự submit lại để tránh duplicate Auth0 transaction.')
+        throw new Error('ChatGPT password submit không có tiến triển sau 25s; dừng thay vì tự submit password lần nữa. Hãy thử login thủ công.')
       }
       if (await anyRealVisible(page, CHATGPT_EMAIL_INPUT)) {
         if (await fillFieldAndSubmit(page, CHATGPT_EMAIL_INPUT, creds.email, CHATGPT_CONTINUE_BTN, 6000)) acted = true
@@ -962,7 +1203,7 @@ async function doLogin() {
     const ctx = await launchPersistent(headful)
     const page = ctx.pages()[0] || (await ctx.newPage())
     try {
-      await tryAutoLoginChatGPT(page, creds, { timeoutSec: loginTimeout })
+      await tryAutoLoginChatGPT(page, creds, { timeoutSec: loginTimeout, allowInteractive: true, interactiveTimeoutSec: 1200 })
       console.error('LOGIN OK — session saved (auto-login from .env).')
       await ctx.close()
       return
@@ -1013,6 +1254,7 @@ async function doLogin() {
     console.error('[switch] already logged in — waiting for you to log out and log in with the other account...')
   }
 
+  const manualAuthAttempt = createOpenAiAuthAttempt()
   for (let i = 0; i < 600; i++) {
     if (browserClosed) {
       console.error('Browser was closed by user.')
@@ -1082,6 +1324,29 @@ async function doLogin() {
         }
       }
     } catch {}
+
+    let routeError = false
+    try { routeError = isRecoverableOpenAiRouteError(await pageBodyText(page), page.url()) } catch {}
+    if (routeError) {
+      if (!claimRouteRecovery(manualAuthAttempt)) {
+        console.error(`[bridge] ${ROUTE_RECOVERY_EXHAUSTED_MESSAGE}`)
+        try { await ctx.close() } catch {}
+        process.exitCode = 1
+        return
+      }
+      console.error(`[bridge] Auth0 Route Error — tự restart login flow (lần ${manualAuthAttempt.recoveries}/3)…`)
+      try {
+        await restartChatgptLoginFlow(page)
+      } catch (e) {
+        console.error(`[bridge] Không thể restart ChatGPT login flow: ${e.message}`)
+        try { await ctx.close() } catch {}
+        process.exitCode = 1
+        return
+      }
+      await sleep(1000)
+      continue
+    }
+
     await sleep(2000)
   }
   console.error('Timed out waiting for login (20 min). Session not saved.')
@@ -1269,7 +1534,7 @@ async function doStatus() {
       console.error(`[status] error: ${e.message}`)
     }
   }
-  console.log(JSON.stringify({ profileExists: hasProfile, cookiesExist: existsSync(cookies), loggedIn, envConfigured: creds.configured, envFileExists: creds.fileExists }))
+  console.log(JSON.stringify({ profileExists: hasProfile, cookiesExist: existsSync(cookies), loggedIn, envConfigured: creds.configured, envFileExists: creds.fileExists, totpConfigured: creds.totpConfigured }))
 }
 
 async function doChats() {
