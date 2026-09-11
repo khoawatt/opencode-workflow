@@ -112,6 +112,8 @@ EOF
 
 grep -q "allowInteractive: true" "$REPO_ROOT/bin/chatgpt-review.mjs" || fail "login --auto does not enable interactive verification fallback"
 grep -q "interactiveTimeoutSec: 1200" "$REPO_ROOT/bin/chatgpt-review.mjs" || fail "login --auto interactive verification window is not 20 minutes"
+grep -q "interactive: isInteractiveOpenAiChallenge(body, url)" "$REPO_ROOT/bin/chatgpt-review.mjs" || fail "password outcome does not preserve interactive challenge classification"
+grep -q "allowInteractive && settled.interactive" "$REPO_ROOT/bin/chatgpt-review.mjs" || fail "password blocker can still abort before interactive handoff"
 # .env must never be committed; examples must exist
 grep -Eq '^\.env$' "$REPO_ROOT/.gitignore" || fail ".gitignore missing .env rule"
 [[ -f "$REPO_ROOT/config/chatgpt-bridge.env.example" ]] || fail "chatgpt .env example missing"
