@@ -2,6 +2,10 @@ export const MAX_ROUTE_RECOVERIES = 3
 export const OPENAI_AUTH_STUCK_MS = 25000
 export const OPENAI_AUTH_HARD_TIMEOUT_MS = 60000
 export const OPENAI_AUTH_TRANSACTION_STORAGE_KEY_PATTERN = '(^|[._-])(state|nonce|transaction|transact|pkce|code[_-]?verifier|csrf)([._-]|$)|^a0\\.spajs\\.txs\\.'
+export const TOTP_STEP_SEC = 30
+export const TOTP_DIGITS_DEFAULT = 6
+export const TOTP_MIN_WINDOW_REMAINING_MS = 3000
+import { createHmac } from 'node:crypto'
 
 export const ROUTE_RECOVERY_EXHAUSTED_MESSAGE = [
   'Auth0 Route Error vẫn lặp lại sau 3 lần recovery.',
@@ -82,12 +86,26 @@ export function createOpenAiAuthAttempt(maxRecoveries = MAX_ROUTE_RECOVERIES) {
     maxRecoveries,
     recoveries: 0,
     passwordSubmitted: false,
+    totpSubmittedCounter: null,
+    totpRetried: false,
   }
 }
 
 export function claimPasswordSubmit(attempt) {
   if (attempt.passwordSubmitted) return false
   attempt.passwordSubmitted = true
+  return true
+}
+
+// Claim one TOTP submission for a given time-step counter. The first claim
+// always succeeds; a second claim succeeds only for a strictly advanced
+// counter (the single allowed retry) and any further claim fails. This makes
+// replaying an already-submitted code impossible by construction.
+export function claimTotpSubmit(attempt, counter) {
+  if (attempt.totpSubmittedCounter === counter) return false
+  if (attempt.totpSubmittedCounter !== null && attempt.totpRetried) return false
+  if (attempt.totpSubmittedCounter !== null) attempt.totpRetried = true
+  attempt.totpSubmittedCounter = counter
   return true
 }
 
@@ -117,4 +135,70 @@ export async function waitForOpenAiPasswordOutcome({
 
     await wait(Math.min(pollMs, hardTimeoutMs - elapsed))
   }
+}
+
+// ---------- TOTP (RFC 6238, authenticator-app autofill) ----------
+// Pure functions only — no browser, no I/O — so they are unit-testable.
+// Errors are generic on purpose: they must never echo the secret.
+
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+
+export function normalizeTotpSecret(secret) {
+  return String(secret || '').replace(/[\s-]+/g, '').toUpperCase()
+}
+
+export function base32Decode(input) {
+  const s = normalizeTotpSecret(input)
+  if (!s || s.length % 8 !== 0) throw new Error('invalid TOTP secret in .env')
+  const padLen = (s.match(/=+$/) || [''])[0].length
+  if (![0, 1, 3, 4, 6].includes(padLen)) throw new Error('invalid TOTP secret in .env')
+  const body = s.slice(0, s.length - padLen)
+  const out = []
+  let buffer = 0
+  let bitsLeft = 0
+  for (const ch of body) {
+    const v = BASE32_ALPHABET.indexOf(ch)
+    if (v < 0) throw new Error('invalid TOTP secret in .env')
+    buffer = (buffer << 5) | v
+    bitsLeft += 5
+    if (bitsLeft >= 8) {
+      bitsLeft -= 8
+      out.push((buffer >> bitsLeft) & 0xff)
+    }
+  }
+  if (bitsLeft > 0 && (buffer & ((1 << bitsLeft) - 1)) !== 0) throw new Error('invalid TOTP secret in .env')
+  if (out.length === 0) throw new Error('invalid TOTP secret in .env')
+  return Buffer.from(out)
+}
+
+export function totpCounterAt(timeMs, stepSec = TOTP_STEP_SEC) {
+  return Math.floor(Number(timeMs) / 1000 / stepSec)
+}
+
+export function totpMsRemainingInWindow(timeMs = Date.now(), stepSec = TOTP_STEP_SEC) {
+  const stepMs = stepSec * 1000
+  return stepMs - (Number(timeMs) % stepMs)
+}
+
+export function totpCode(secret, { timeMs = Date.now(), stepSec = TOTP_STEP_SEC, digits = TOTP_DIGITS_DEFAULT } = {}) {
+  const key = base32Decode(secret) // throws generic error, never echoes secret
+  const counter = totpCounterAt(timeMs, stepSec)
+  const msg = Buffer.alloc(8)
+  msg.writeBigUInt64BE(BigInt(counter))
+  const mac = createHmac('sha1', key).update(msg).digest()
+  const offset = mac[mac.length - 1] & 0x0f
+  const code = ((mac[offset] & 0x7f) << 24) | (mac[offset + 1] << 16) | (mac[offset + 2] << 8) | mac[offset + 3]
+  return { code: String(code % 10 ** digits).padStart(digits, '0'), counter }
+}
+
+// Gate for TOTP autofill. ALL of these must hold:
+//  - page is on an OpenAI auth origin (never fill OTP inputs elsewhere),
+//  - the page is positively an authenticator-MFA challenge,
+//  - the page is NOT an email-code prompt (those have no TOTP secret).
+export function isOpenAiAuthenticatorChallenge(bodyText, url) {
+  if (!isOpenAiAuthUrl(url)) return false
+  const body = String(bodyText || '').toLowerCase()
+  if (/check your email|we sent you/.test(body)) return false
+  if (/\/mfa-challenge/.test(String(url || ''))) return true
+  return /authenticator|one-time authentication code|one-time-code|one time code/.test(body)
 }

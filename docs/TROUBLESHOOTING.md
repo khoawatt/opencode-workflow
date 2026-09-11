@@ -9,6 +9,9 @@
 | `login --auto` báo sai password / không tìm thấy account | kiểm tra lại email/password trong `.env` (log chỉ hiện email mask); đổi pass thì cập nhật `.env` |
 | `Oops, an error occurred / Route Error (400 Invalid content type)` khi login email | bridge tự nhận diện transaction Auth0 stale/hỏng, xóa riêng OpenAI/Auth0 transaction cookies/storage rồi restart từ `chatgpt.com` (tối đa 3 lần); password submit được serialize, không tự bấm lại khi request trước chưa settle. Nếu vẫn lỗi: chạy `chatgpt-review logout`, sau đó `chatgpt-review login` |
 | `login --auto` gặp mã xác minh / 2FA / CAPTCHA | `login --auto` sẽ giữ browser mở và chờ tối đa 20 phút để bạn nhập code/xác minh thủ công trong chính cửa sổ đó; sau khi session xuất hiện bridge tự tiếp tục và lưu profile. Auto-login phát sinh trong `ask` vẫn fail-fast thay vì chờ tương tác |
+| Auto-TOTP báo secret không hợp lệ | kiểm tra `CHATGPT_TOTP_SECRET` là base32 (A-Z, 2-7, không khoảng trắng lạ); log không bao giờ in secret |
+| Auto-TOTP thất bại dù secret đúng | đồng bộ giờ hệ thống (NTP/chrony) — mã TOTP chỉ sống 30s; bridge thử tối đa 2 mã rồi chờ nhập tay, không spam để tránh rate-limit |
+| Đổi/lộ TOTP secret | re-enroll 2FA trên OpenAI, cập nhật `.env`, `chmod 600`, chạy `login --auto` lại |
 | `.env` báo `insecure permissions` | `chmod 600 ~/.config/opencode/{chatgpt,gemini}-bridge/.env` |
 | `chatgpt-review login` muốn đổi account | `chatgpt-review login --switch` (giữ browser mở, đợi token đổi; thêm `--wait=30` để giữ mở 30s sau login mới) |
 | `chatgpt-review login` treo sau khi đóng window | đã fix `browserClosed` detection — đóng window sẽ báo `LOGIN OK (browser closed)` nếu có session, else `No session cookie`; nếu vẫn treo, `cat ~/.config/opencode/chatgpt-bridge/.lock` và check PID |

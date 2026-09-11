@@ -77,11 +77,24 @@ Muốn tắt hành vi này (chỉ dùng session có sẵn): thêm `--no-auto-log
 - Đổi mật khẩu → cập nhật lại `.env`, chạy `login --auto` lại.
 - Đổi account ChatGPT khi đã login: vẫn dùng `login --switch` thủ công.
 
-## 5. Verify
+## 5. Full-auto với TOTP (authenticator app, chỉ ChatGPT)
+
+Nếu account bật 2FA kiểu authenticator app, thêm secret base32 (lúc enroll 2FA) vào `.env`:
+
+```bash
+CHATGPT_TOTP_SECRET=JBSWY3DPEHPK3PXP   # ví dụ — dùng secret của bạn
+chmod 600 ~/.config/opencode/chatgpt-bridge/.env
+```
+
+Bridge tự sinh mã 6 số **ngay trên máy** (chuẩn RFC 6238, không gọi dịch vụ ngoài như 2fa.live, secret không rời máy và không bao giờ in ra log) và điền vào màn `mfa-challenge`. Quy tắc an toàn: submit đúng 1 lần, thử lại tối đa 1 lần với cửa sổ giờ mới, không thử lại khi bị rate-limit, hết lượt thì rơi về chờ nhập tay. `status` báo `totpConfigured:true/false` (boolean, không lộ secret).
+
+Tradeoff (trung thực): để TOTP cạnh password trong `.env` thì 2FA còn 1 điểm chứa cả 2 yếu tố — chấp nhận được trên máy cá nhân tin cậy (`chmod 600`, không commit). **Nếu secret từng lộ (ảnh chụp, chat, repo), rotate/re-enroll 2FA ngay.** Gemini không thuộc scope (vẫn nhập tay).
+
+## 6. Verify
 
 ```bash
 node --check bin/bridge-env.mjs bin/chatgpt-review.mjs bin/gemini-review.mjs
 bash tests/test.sh
-~/.config/opencode/chatgpt-bridge/bin/chatgpt-review status  # envConfigured:true, loggedIn:true
+~/.config/opencode/chatgpt-bridge/bin/chatgpt-review status  # envConfigured:true, totpConfigured:true/false, loggedIn:true
 ~/.config/opencode/gemini-bridge/bin/gemini-review status    # envConfigured:true, loggedIn:true
 ```

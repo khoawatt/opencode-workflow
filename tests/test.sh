@@ -108,6 +108,34 @@ assert.equal(auth.isOpenAiAuthUrl('https://accounts.google.com/signin'), false)
 assert.equal(auth.isOpenAiAuthUrl('https://chatgpt.com/'), false)
 assert.equal(auth.isOpenAiAuthUrl('https://auth0.com.evil.example/'), false)
 assert.equal(auth.isOpenAiAuthUrl('https://notauth0.com/'), false)
+
+const RFC_B32 = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'
+assert.deepEqual(auth.base32Decode(RFC_B32), Buffer.from('12345678901234567890'), 'base32 must decode to the RFC 6238 raw key')
+assert.equal(auth.base32Decode('  gezd gnbv gy3t qojq gezd gnbv gy3t qojq ').toString(), '12345678901234567890', 'base32 must ignore whitespace/case')
+for (const bad of ['', 'ABC!DEFG', 'MZ======', 'AB==CD==', 'A']) {
+  assert.throws(() => auth.base32Decode(bad), /invalid TOTP secret/, `bad secret accepted: ${bad}`)
+}
+try { auth.base32Decode('!!'); assert.fail('expected throw') } catch (e) { assert.match(e.message, /invalid TOTP secret/); assert.ok(!/!!/.test(e.message), 'error echoed the secret') }
+// RFC 6238 Appendix B SHA-1 vectors, 8 digits
+for (const [t, expected] of [[59, '94287082'], [1111111109, '07081804'], [1111111111, '14050471'], [1234567890, '89005924'], [2000000000, '69279037'], [20000000000, '65353130']]) {
+  const { code } = auth.totpCode(RFC_B32, { timeMs: t * 1000, digits: 8 })
+  assert.equal(code, expected, `RFC6238 vector t=${t}`)
+}
+assert.equal(auth.totpCounterAt(59000), 1)
+assert.equal(auth.totpMsRemainingInWindow(59000), 1000)
+
+const mfaUrl = 'https://auth.openai.com/mfa-challenge/abc'
+assert.equal(auth.isOpenAiAuthenticatorChallenge('Check your authenticator app. Enter the one-time authentication code.', mfaUrl), true)
+assert.equal(auth.isOpenAiAuthenticatorChallenge('Check your email. We sent you a code.', 'https://auth.openai.com/u/email-verify'), false, 'email-code must not be TOTP-eligible')
+assert.equal(auth.isOpenAiAuthenticatorChallenge('Enter the one-time code from your app', 'https://evil.example/otp'), false, 'non-OpenAI origin must never be TOTP-eligible')
+assert.equal(auth.isOpenAiAuthenticatorChallenge('Enter the one-time code from your app', 'https://chatgpt.com/'), false, 'chatgpt.com is not an auth origin')
+
+const totpAttempt = auth.createOpenAiAuthAttempt()
+assert.equal(totpAttempt.totpSubmittedCounter, null)
+assert.equal(auth.claimTotpSubmit(totpAttempt, 100), true, 'first TOTP submit')
+assert.equal(auth.claimTotpSubmit(totpAttempt, 100), false, 'same TOTP counter replayed')
+assert.equal(auth.claimTotpSubmit(totpAttempt, 101), true, 'single retry with advanced counter')
+assert.equal(auth.claimTotpSubmit(totpAttempt, 102), false, 'second retry must be blocked')
 EOF
 
 grep -q "allowInteractive: true" "$REPO_ROOT/bin/chatgpt-review.mjs" || fail "login --auto does not enable interactive verification fallback"

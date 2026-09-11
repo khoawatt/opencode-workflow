@@ -8,14 +8,20 @@ import { loadBridgeCreds, credsHelp, maskEmail, resolveBridgeDir, CHATGPT_KEYS }
 import {
   ROUTE_RECOVERY_EXHAUSTED_MESSAGE,
   OPENAI_AUTH_TRANSACTION_STORAGE_KEY_PATTERN,
+  TOTP_MIN_WINDOW_REMAINING_MS,
+  base32Decode,
   claimPasswordSubmit,
   claimRouteRecovery,
+  claimTotpSubmit,
   createOpenAiAuthAttempt,
   detectOpenAiAuthBlocker as detectChatgptBlocker,
   isInteractiveOpenAiChallenge,
+  isOpenAiAuthenticatorChallenge,
   isOpenAiAuthTransactionCookie,
   isOpenAiAuthUrl,
   isRecoverableOpenAiRouteError,
+  totpCode,
+  totpMsRemainingInWindow,
   waitForOpenAiPasswordOutcome,
 } from './chatgpt-auth-flow.mjs'
 const require = createRequire(import.meta.url)
@@ -526,6 +532,7 @@ function loadChatgptCreds() {
     envFileVar: 'CHATGPT_ENV_FILE',
     emailKeys: CHATGPT_KEYS.emailKeys,
     passwordKeys: CHATGPT_KEYS.passwordKeys,
+    totpKeys: CHATGPT_KEYS.totpKeys,
   })
 }
 
@@ -776,6 +783,74 @@ const OPENAI_CODE_INPUT = [
   'input[autocomplete="one-time-code"]',
   'input[name="code"]',
 ]
+const MFA_SUBMIT_BTNS = [
+  'button[type="submit"]',
+  'button:has-text("Verify")',
+  'button:has-text("Continue")',
+]
+
+// Observe one TOTP submit for up to 25s. Returns 'logged-in' | 'auth0-error' |
+// 'rate-limited' | 'wrong-code' | 'changed' (left the MFA screen without a
+// verdict) | 'timeout' (no signal at all).
+async function observeTotpOutcome(page, timeoutMs = 25000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    await sleep(1000)
+    try {
+      if (await isLoggedIn(page)) return 'logged-in'
+      const u = page.url()
+      const b = await pageBodyText(page)
+      if (isRecoverableOpenAiRouteError(b, u)) return 'auth0-error'
+      if (/rate.?limit|too many|429/.test(b)) return 'rate-limited'
+      if (/incorrect|invalid.*code|wrong.*code|code expired|try again/.test(b)) return 'wrong-code'
+      const stillMfa = /\/mfa-challenge/.test(u) || await anyRealVisible(page, OPENAI_CODE_INPUT)
+      if (!stillMfa) return 'changed'
+    } catch {}
+  }
+  return 'timeout'
+}
+
+// Fully automatic TOTP submit using CHATGPT_TOTP_SECRET from .env.
+// Returns 'logged-in' | 'auth0-error' | 'changed' | 'manual'.
+// Invariants (audited): at most 2 submits (current counter + one retry with a
+// strictly advanced counter, enforced by claimTotpSubmit); never submit in
+// the last ~3s of a window (wait for a fresh one); never retry after
+// rate-limit; the code value is never logged.
+async function tryAutoTotpSubmit(page, creds, authAttempt) {
+  try {
+    base32Decode(creds.totpSecret)
+  } catch {
+    console.error('[bridge] CHATGPT_TOTP_SECRET không hợp lệ — bỏ qua auto-TOTP, chờ nhập tay…')
+    return 'manual'
+  }
+  let waitedForWindow = false
+  for (;;) {
+    // Re-confirm the state machine still shows an OpenAI authenticator
+    // challenge (the page may have moved on while we waited).
+    if (!isOpenAiAuthenticatorChallenge(await pageBodyText(page), page.url())) return 'changed'
+    const remaining = totpMsRemainingInWindow(Date.now())
+    if (remaining < TOTP_MIN_WINDOW_REMAINING_MS && !waitedForWindow) {
+      waitedForWindow = true
+      await sleep(remaining + 400)
+      continue
+    }
+    const { code, counter } = totpCode(creds.totpSecret, { timeMs: Date.now() })
+    if (!claimTotpSubmit(authAttempt, counter)) return 'manual'
+    console.error('[bridge] tự điền mã TOTP từ .env (mã không hiện trong log)…')
+    await fillFieldAndSubmit(page, OPENAI_CODE_INPUT, code, MFA_SUBMIT_BTNS, 8000)
+    const outcome = await observeTotpOutcome(page)
+    if (outcome === 'logged-in') return 'logged-in'
+    if (outcome === 'auth0-error') return 'auth0-error'
+    if (outcome === 'changed') return 'changed'
+    if (outcome === 'rate-limited') {
+      console.error('[bridge] bị rate-limit sau khi submit TOTP — dừng auto, chờ nhập tay…')
+      return 'manual'
+    }
+    // 'wrong-code' | 'timeout': loop once more with a fresh (advanced)
+    // counter; claimTotpSubmit blocks anything beyond the single retry.
+    await sleep(1500)
+  }
+}
 
 async function waitForInteractiveAuth(page, { timeoutSec = 1200, reason = 'verification' } = {}) {
   console.error(`[bridge] ${reason} cần thao tác thủ công — browser vẫn mở, hãy hoàn tất bước xác minh trong cửa sổ (tối đa ${Math.round(timeoutSec / 60)} phút)…`)
@@ -841,6 +916,18 @@ async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150, allowInterac
           continue
         }
       } catch {}
+      // Authenticator-app MFA + TOTP secret configured: fill automatically.
+      // The gate requires an OpenAI origin AND a positive authenticator
+      // classification AND no email-code signals (checked inside).
+      let totpManualFallback = false
+      if (creds.totpConfigured && isOpenAiAuthenticatorChallenge(body, url)) {
+        const auto = await tryAutoTotpSubmit(page, creds, authAttempt)
+        if (auto === 'logged-in') return true
+        if (auto === 'auth0-error' || auto === 'changed') continue
+        // 'manual' → fall through to the interactive wait below
+        // (explicit `login --auto` only; background `ask` fails fast).
+        totpManualFallback = true
+      }
       if (allowInteractive) {
         const interactive = await waitForInteractiveAuth(page, {
           timeoutSec: interactiveTimeoutSec,
@@ -850,6 +937,9 @@ async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150, allowInterac
         if (interactive.state === 'auth0-error') continue
         if (interactive.state === 'closed') throw new Error('Browser/page đã bị đóng trong lúc chờ nhập mã xác minh.')
         throw new Error(`Hết thời gian chờ nhập mã xác minh (${interactiveTimeoutSec}s).`)
+      }
+      if (totpManualFallback) {
+        throw new Error('Auto-TOTP thất bại (sai mã, hết lượt thử, hoặc secret không khớp) — nhập mã thủ công 1 lần (`login`), session sẽ được tái dùng. Kiểm tra CHATGPT_TOTP_SECRET trong .env và giờ hệ thống (NTP).')
       }
       throw new Error('ChatGPT gửi mã xác minh về email (tài khoản chưa có password) — nhập mã thủ công 1 lần (`login`), hoặc bấm "Continue with password" trong bản web. Auto-login không đọc được inbox.')
     }
@@ -1430,7 +1520,7 @@ async function doStatus() {
       console.error(`[status] error: ${e.message}`)
     }
   }
-  console.log(JSON.stringify({ profileExists: hasProfile, cookiesExist: existsSync(cookies), loggedIn, envConfigured: creds.configured, envFileExists: creds.fileExists }))
+  console.log(JSON.stringify({ profileExists: hasProfile, cookiesExist: existsSync(cookies), loggedIn, envConfigured: creds.configured, envFileExists: creds.fileExists, totpConfigured: creds.totpConfigured }))
 }
 
 async function doChats() {
