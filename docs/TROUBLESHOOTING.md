@@ -7,6 +7,7 @@
 | `chatgpt-review` báo `loggedIn: false` | chạy `~/.config/opencode/chatgpt-bridge/bin/chatgpt-review login` trong desktop có display, đợi `LOGIN OK` — hoặc cấu hình `.env` rồi `login --auto` (xem `docs/AUTO_LOGIN.md`) |
 | `login --auto` báo thiếu credentials | điền `CHATGPT_EMAIL/CHATGPT_PASSWORD` (hoặc `GEMINI_EMAIL/GEMINI_PASSWORD`) vào bridge `.env`, `chmod 600`, chạy lại; shell env thắng file |
 | `login --auto` báo sai password / không tìm thấy account | kiểm tra lại email/password trong `.env` (log chỉ hiện email mask); đổi pass thì cập nhật `.env` |
+| `Oops, an error occurred / Route Error (400 Invalid content type)` khi login email | bridge tự nhận diện transaction Auth0 stale/hỏng, xóa riêng auth transaction cookies và restart flow (tối đa 3 lần); password submit được serialize, không tự bấm lại khi request trước chưa settle. Nếu vẫn lỗi: `chatgpt-review logout` rồi `chatgpt-review login` để tạo profile sạch |
 | `login --auto` báo 2FA/CAPTCHA/`browser may not be secure` | auto không qua được — chạy `login` thủ công 1 lần để lưu `profile/`, các lần sau tái dùng; `ask` sẽ tự retry `.env` khi hết session |
 | `.env` báo `insecure permissions` | `chmod 600 ~/.config/opencode/{chatgpt,gemini}-bridge/.env` |
 | `chatgpt-review login` muốn đổi account | `chatgpt-review login --switch` (giữ browser mở, đợi token đổi; thêm `--wait=30` để giữ mở 30s sau login mới) |
