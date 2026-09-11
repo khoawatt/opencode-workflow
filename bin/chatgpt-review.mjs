@@ -1005,6 +1005,20 @@ async function tryAutoLoginChatGPT(page, creds, { timeoutSec = 150, allowInterac
           // replace or blank the challenge DOM between polls, which previously
           // made an interactive CAPTCHA/verification fall through and abort.
           if (allowInteractive && settled.interactive) {
+            // Authenticator-app MFA with a configured TOTP secret: try fully
+            // automatic fill FIRST — the outer-loop code-input branch is never
+            // reached from here, so without this the flow would always wait
+            // for manual entry. Falls through to the manual wait on 'manual'.
+            try {
+              const b0 = await pageBodyText(page)
+              const u0 = page.url()
+              if (creds.totpConfigured && (await anyRealVisible(page, OPENAI_CODE_INPUT)) && isOpenAiAuthenticatorChallenge(b0, u0)) {
+                const auto = await tryAutoTotpSubmit(page, creds, authAttempt)
+                if (auto === 'logged-in') return true
+                if (auto === 'auth0-error') continue
+                // 'changed' | 'manual' → fall through to manual wait below.
+              }
+            } catch {}
             const interactive = await waitForInteractiveAuth(page, {
               timeoutSec: interactiveTimeoutSec,
               reason: 'ChatGPT yêu cầu xác minh sau khi submit password',
