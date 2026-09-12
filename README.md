@@ -364,3 +364,4 @@ Dự án được phân phối dưới giấy phép **MIT License**. Xem chi ti�
 ## Bảo mật (Security)
 
 Vui lòng xem [SECURITY.md](SECURITY.md) để báo cáo lỗ hổng bảo mật. Không mở issue công khai cho vấn đề bảo mật.
+<!-- yolo: readme touch for GitHub YOLO achievement -->
