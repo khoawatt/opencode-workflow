@@ -57,6 +57,7 @@ copy_if_absent "$REPO_DIR/command/autoreview.md"             "$TARGET/.opencode/
 copy_if_absent "$REPO_DIR/command/chatgpt-new.md"            "$TARGET/.opencode/commands/chatgpt-new.md"
 copy_if_absent "$REPO_DIR/command/chatgpt-project.md"        "$TARGET/.opencode/commands/chatgpt-project.md"
 copy_if_absent "$REPO_DIR/command/export-skill.md"           "$TARGET/.opencode/commands/export-skill.md"
+copy_if_absent "$REPO_DIR/command/gen-image.md"              "$TARGET/.opencode/commands/gen-image.md"
 copy_if_absent "$REPO_DIR/command/gemini-new.md"             "$TARGET/.opencode/commands/gemini-new.md" 2>/dev/null || true
 
 # --- Sources sync (hybrid .git + metadata, retention 1) ---
