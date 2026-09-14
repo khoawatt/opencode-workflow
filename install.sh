@@ -43,6 +43,7 @@ setup_config() {
 
   [ -f "$REPO_DIR/agent/chatgpt-review.md" ] && cp "$REPO_DIR/agent/chatgpt-review.md" "$CFG/agent/"
   [ -f "$REPO_DIR/agent/gemini-review.md" ] && cp "$REPO_DIR/agent/gemini-review.md" "$CFG/agent/"
+  [ -f "$REPO_DIR/agent/agy-worker.md" ] && cp "$REPO_DIR/agent/agy-worker.md" "$CFG/agent/"
   for d in "$REPO_DIR/skill/"*/; do [ -d "$d" ] && cp -R "$d" "$CFG/skills/" 2>/dev/null || true; done
   [ -d "$REPO_DIR/command" ] && cp "$REPO_DIR/command/"*.md "$CFG/command/" 2>/dev/null || true
   [ -f "$REPO_DIR/plugin/chatgpt-autoreview.ts" ] && cp "$REPO_DIR/plugin/chatgpt-autoreview.ts" "$CFG/plugins/"
