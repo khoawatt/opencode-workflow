@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
 let chromium
-try { ({ chromium } = require('playwright')) } catch { const r2=require.createRequire('/home/audition/.config/opencode/chatgpt-bridge/package.json'); ({ chromium } = r2('playwright')) }
+try { ({ chromium } = require('playwright')) } catch { try { const r2=createRequire(join(homedir(),'.config/opencode/chatgpt-bridge/package.json')); ({ chromium } = r2('playwright')) } catch { const r3=createRequire(join(homedir(),'.config/opencode/gemini-bridge/package.json')); ({ chromium } = r3('playwright')) } }
 
 const HOME = homedir()
 const BRIDGE_DIR = join(HOME, '.config/opencode/chatgpt-bridge')
@@ -431,38 +431,61 @@ async function doUpload(){
       try{ await page.screenshot({path:'/tmp/sources-sync-no-add.png'}); console.error(`screenshot /tmp/sources-sync-no-add.png`)}catch{}
       throw new Error('Add source button not found')
     }
-    console.error(`[sources-sync] clicking Add source...`)
-    // Need to handle file chooser - Sources panel has dedicated hidden input
-    // The Sources input is inside [data-project-home-sources-surface] and is the last input[type=file] without accept
-    const sourcesInput = page.locator('[data-project-home-sources-surface] input[type="file"]').first()
-    const inputsInPanel = page.getByRole('tabpanel').locator('input[type="file"]')
-    console.error(`[sources-sync] sourcesInput count ${await sourcesInput.count()}, panel inputs ${await inputsInPanel.count()}`)
-    // Try fileChooser from Add sources button first
-    const [fileChooser] = await Promise.all([
-      page.waitForEvent('filechooser', {timeout: 8000}).catch(()=>null),
-      addBtn.click({force:true})
-    ])
-    if(fileChooser){
-      console.error(`[sources-sync] fileChooser detected, setting ${zipPath}`)
-      await fileChooser.setFiles(zipPath)
-    } else if(await sourcesInput.count()){
-      console.error(`[sources-sync] no fileChooser, using Sources panel input directly`)
-      await sourcesInput.setInputFiles(zipPath)
-      console.error(`[sources-sync] setInputFiles via Sources input done`)
-    } else if(await inputsInPanel.count()){
-      console.error(`[sources-sync] fallback to tabpanel input`)
-      await inputsInPanel.first().setInputFiles(zipPath)
-      console.error(`[sources-sync] setInputFiles via tabpanel input done`)
-    } else {
-      console.error(`[sources-sync] no fileChooser event, trying generic input[type=file]`)
-      const input = page.locator('input[type="file"]').first()
-      if(await input.count()){
-        await input.setInputFiles(zipPath)
-        console.error(`[sources-sync] setInputFiles via generic input done (may go to chat, not Sources)`)
+    // Click Add source to open the "Add sources" modal (seen in screenshot)
+    console.error(`[sources-sync] clicking Add source to open modal...`)
+    await addBtn.click({force:true})
+    await new Promise(r=>setTimeout(r,2000))
+    // Wait for modal
+    const modal = page.locator('text=Add sources').first()
+    if(await modal.count()) console.error(`[sources-sync] Add sources modal visible`)
+    else console.error(`[sources-sync] modal not found, continuing`)
+
+    // Now click Upload inside modal and handle fileChooser
+    const uploadBtn = page.locator('button:has-text("Upload")').first()
+    const uploadCount = await uploadBtn.count()
+    console.error(`[sources-sync] Upload button count ${uploadCount}`)
+    let uploaded = false
+    if(uploadCount){
+      const [fileChooser] = await Promise.all([
+        page.waitForEvent('filechooser', {timeout: 10000}).catch(()=>null),
+        uploadBtn.click({force:true})
+      ])
+      if(fileChooser){
+        console.error(`[sources-sync] fileChooser via Upload button, setting ${zipPath}`)
+        await fileChooser.setFiles(zipPath)
+        uploaded = true
+        await new Promise(r=>setTimeout(r,1000))
+        try{ await page.keyboard.press('Escape'); }catch{}
       } else {
-        throw new Error('file chooser not detected and no input[type=file] found')
+        console.error(`[sources-sync] no fileChooser from Upload button, trying direct inputs`)
       }
     }
+    // Fallback: try direct setInputFiles on known hidden inputs (modal's drag area)
+    if(!uploaded){
+      const sourcesInput = page.locator('[data-project-home-sources-surface] input[type="file"]').first()
+      const inputsInPanel = page.getByRole('tabpanel').locator('input[type="file"]')
+      const modalInput = page.locator('div[role="dialog"] input[type="file"]').first()
+      console.error(`[sources-sync] fallback counts: sourcesInput ${await sourcesInput.count()}, panel ${await inputsInPanel.count()}, modal ${await modalInput.count()}`)
+      for(const inp of [sourcesInput, inputsInPanel.first(), modalInput]){
+        try{
+          if(await inp.count()){
+            await inp.setInputFiles(zipPath)
+            console.error(`[sources-sync] setInputFiles fallback done`)
+            uploaded = true
+            break
+          }
+        }catch(e){ console.error(`[sources-sync] fallback setInputFiles failed: ${e.message}`) }
+      }
+      if(!uploaded){
+        const generic = page.locator('input[type="file"]').first()
+        if(await generic.count()){
+          await generic.setInputFiles(zipPath)
+          console.error(`[sources-sync] generic setInputFiles done`)
+          uploaded = true
+        }
+      }
+    }
+    if(!uploaded) throw new Error('upload failed: no input succeeded')
 
     // After file selected, some UIs show a confirmation button (Add/Upload/Save/Create)
     await new Promise(r=>setTimeout(r,1500))
@@ -807,7 +830,9 @@ async function doSync(){
   const prompt = `Trong Project auto-zip, đọc file __chatgpt_source_probe__.txt trong ZIP vừa upload. Trả lời chính xác dòng đầu tiên (CHATGPT_SOURCE_ZIP_PROBE_...). Nếu không thấy, trả lời NOT_FOUND. Sentinel mong đợi: ${sentinel}`
   let verifyOk=false
   try{
-    const out = ef(`cat <<'PROMPT' | NODE_PATH=/home/audition/.config/opencode/chatgpt-bridge/node_modules /home/audition/.config/opencode/chatgpt-bridge/bin/chatgpt-review ask --project --new --timeout=90 2>&1
+    const bridgeBin = join(BRIDGE_DIR, 'bin', 'chatgpt-review')
+    const bridgeModules = join(BRIDGE_DIR, 'node_modules')
+    const out = ef(`cat <<'PROMPT' | NODE_PATH="${bridgeModules}" "${bridgeBin}" ask --project --new --timeout=90 2>&1
 ${prompt}
 PROMPT`, {encoding:'utf8', shell:'/bin/bash', timeout:120000})
     console.error(`[sync] verify output: ${out.slice(0,500)}`)

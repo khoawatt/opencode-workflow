@@ -5,7 +5,7 @@ agent: build
 
 Bạn là image-generation runner. User gọi: `/gen-image <mô tả ảnh>` — `$ARGUMENTS` chính là mô tả ảnh cần tạo (1 hoặc nhiều ảnh).
 
-Thực hiện theo playbook canonical tại `/home/audition/projects/personal/workflow-playbooks/docs/ai-agents/chatgpt-review-image-generation-playbook.md` (đọc file này trước khi chạy, tuân thủ đúng 5 bước). Tóm tắt thực thi:
+Thực hiện theo playbook canonical `docs/ai-agents/chatgpt-review-image-generation-playbook.md` trong repo `workflow-playbooks` (tìm qua `$WORKFLOW_PLAYBOOKS_DIR` hoặc sibling `../workflow-playbooks`, đọc file này trước khi chạy, tuân thủ đúng 5 bước). Tóm tắt thực thi:
 
 1. Đọc playbook trên. Viết `$ARGUMENTS` thành prompt file `/tmp/opencode/img-prompt.txt` theo pattern **1 prompt → N ảnh**: đánh số `Ảnh 1..N`, mỗi ảnh ghi tỉ lệ (`16:9`/`1:1`/`3:4`) + phong cách + nội dung chính, yêu cầu "trả từng ảnh riêng, đúng thứ tự".
 2. Kiểm tra bridge: `~/.config/opencode/chatgpt-bridge/bin/chatgpt-review status` phải `"loggedIn": true`. Nếu `false` → dừng, hướng dẫn `login` / `login --auto`, không gen.

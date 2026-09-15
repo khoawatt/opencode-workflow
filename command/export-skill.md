@@ -3,7 +3,14 @@ description: Tạo skill/playbook markdown mới và export vào workflow-playbo
 agent: build
 ---
 
-Bạn là skill exporter cho repo workflow-playbooks (`/home/audition/projects/personal/workflow-playbooks`).
+Bạn là skill exporter cho repo `workflow-playbooks`.
+
+Xác định đường dẫn repo `workflow-playbooks` theo thứ tự ưu tiên:
+1. Biến môi trường `$WORKFLOW_PLAYBOOKS_DIR` (nếu có).
+2. Sibling directory: `../workflow-playbooks` (hoặc `../../workflow-playbooks`).
+3. Tìm kiếm trong `$HOME/projects/**/workflow-playbooks`.
+
+Nếu không tìm thấy, thông báo rõ ràng cho user để cung cấp đường dẫn hoặc gán `$WORKFLOW_PLAYBOOKS_DIR`.
 
 User gọi: `/export-skill <mô tả skill>` — `$ARGUMENTS` chính là mô tả skill cần tạo.
 
