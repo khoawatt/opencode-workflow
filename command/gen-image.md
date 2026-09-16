@@ -1,18 +1,35 @@
 ---
-description: Gen 1–N ảnh qua @chatgpt-review chạy nền (bash & + poll)
+description: Generate and recover 1–N images with durable lifecycle state
 agent: build
 ---
 
-Bạn là image-generation runner. User gọi: `/gen-image <mô tả ảnh>` — `$ARGUMENTS` chính là mô tả ảnh cần tạo (1 hoặc nhiều ảnh).
+Bạn là image-generation runner. User gọi `/gen-image <mô tả ảnh>`; `$ARGUMENTS`
+là yêu cầu cho một hoặc nhiều ảnh.
 
-Thực hiện theo playbook canonical `docs/ai-agents/chatgpt-review-image-generation-playbook.md` trong repo `workflow-playbooks` (tìm qua `$WORKFLOW_PLAYBOOKS_DIR` hoặc sibling `../workflow-playbooks`, đọc file này trước khi chạy, tuân thủ đúng 5 bước). Tóm tắt thực thi:
+Trước khi chạy, đọc và tuân thủ playbook canonical
+`docs/ai-agents/chatgpt-review-image-generation-playbook.md` trong repo
+`workflow-playbooks` (tìm qua `$WORKFLOW_PLAYBOOKS_DIR` hoặc sibling
+`../workflow-playbooks`). Playbook là source of truth cho lifecycle, recovery,
+validation, audit, review, retry và publish boundary; không lặp lại lifecycle ở
+command này.
 
-1. Đọc playbook trên. Viết `$ARGUMENTS` thành prompt file `/tmp/opencode/img-prompt.txt` theo pattern **1 prompt → N ảnh**: đánh số `Ảnh 1..N`, mỗi ảnh ghi tỉ lệ (`16:9`/`1:1`/`3:4`) + phong cách + nội dung chính, yêu cầu "trả từng ảnh riêng, đúng thứ tự".
-2. Kiểm tra bridge: `~/.config/opencode/chatgpt-bridge/bin/chatgpt-review status` phải `"loggedIn": true`. Nếu `false` → dừng, hướng dẫn `login` / `login --auto`, không gen.
-3. Chạy nền (không block session):
-   `nohup ~/.config/opencode/chatgpt-bridge/bin/chatgpt-review ask --file /tmp/opencode/img-prompt.txt > /tmp/opencode/img-gen-<timestamp>.log 2>&1 & echo $! > /tmp/opencode/img-gen.pid`
-   Sau đó poll `kill -0 $(cat /tmp/opencode/img-gen.pid)` + `tail` log (mỗi 30s, tối đa ~15 phút). Không bắn batch thứ hai khi batch đầu còn RUNNING (bridge serialize qua `.lock`).
-4. Lấy URL/file ảnh từ log, `curl` về nơi lưu **tùy ngữ cảnh**: web app → `assets/generated/<yyyy-mm-dd>/`, docs → `docs/assets/<topic>/`, task tạm → `/tmp/opencode/img-out/` rồi move khi chốt. Tên file `lowercase-kebab-case.png`, gắn số thứ tự (`hero-01.png`).
-5. `read` từng ảnh để verify vision khớp mô tả; ảnh nào sai gen bù riêng, không gen lại cả batch.
+Yêu cầu runner:
 
-Nếu `$ARGUMENTS` trống → yêu cầu user bổ sung 1 câu mô tả ảnh. Báo kết quả: số ảnh, đường dẫn file đã lưu, log path.
+- Chuẩn bị prompt/task requirements và audit record theo playbook.
+- Kiểm tra bridge login và single-profile ownership trước khi submit.
+- Sau submission, lưu durable generation ID sớm nhất có thể. Timeout chờ text
+  không phải generation failure; với ID đã biết phải observe/recover ID đó trước
+  mọi resubmission. `SUBMIT_UNKNOWN` không phải `SUBMIT_REJECTED`.
+- Chỉ chấp nhận original binary đã validation; preview/thumbnail không phải
+  original. Giữ original và canonical artifact tách biệt.
+- Dừng ở review trừ khi task đã authorize publish. Publish và production
+  verification là các phase riêng.
+
+Nếu `$ARGUMENTS` trống, yêu cầu user bổ sung mô tả ngắn. Khi bàn giao, luôn báo:
+
+- lifecycle state;
+- durable generation ID (hoặc lý do chưa có);
+- audit path;
+- original/canonical artifact paths;
+- review status;
+- publish/production-verification status nếu có.

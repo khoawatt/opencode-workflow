@@ -26,6 +26,105 @@ else
   fail "bin/bridge-env.mjs missing (shared .env loader)"
 fi
 
+# ChatGPT submission lifecycle behavior (no browser required).
+REPO_ROOT="$REPO_ROOT" CHATGPT_REVIEW_IMPORT_ONLY=1 node --input-type=module <<'EOF'
+import { strict as assert } from 'node:assert'
+import { readFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
+
+const bridgePath = `${process.env.REPO_ROOT}/bin/chatgpt-review.mjs`
+const bridge = await import(pathToFileURL(bridgePath))
+const durableId = '6aa8b2f9-1f9c-83ec-855e-4327746649a3'
+const previous = {
+  id: durableId,
+  turns: 2,
+  chars: 100,
+  createdAt: 10,
+  approval: { verdict: 'approve' },
+}
+
+const submitted = bridge.createSubmissionRecord({
+  previous,
+  reused: true,
+  durableId,
+  promptSha256: 'prompt-hash',
+  promptLength: 20,
+  now: 1000,
+  lastObservedUrl: `https://chatgpt.com/c/${durableId}`,
+})
+assert.equal(submitted.lifecycleState, 'SUBMITTED')
+assert.equal(submitted.durableGenerationId, durableId)
+assert.equal(submitted.submissionStatus, 'accepted')
+assert.equal(submitted.promptSha256, 'prompt-hash')
+assert.equal(submitted.completionStatus, 'unobserved')
+assert.equal(submitted.safeToResubmit, false)
+assert.equal(submitted.turns, 3)
+assert.equal(submitted.chars, 120)
+assert.equal(submitted.approval, undefined, 'new submission retained stale review approval')
+
+const initiallyUnknown = bridge.createSubmissionRecord({
+  promptLength: 20,
+  now: 1000,
+  lastObservedUrl: 'https://chatgpt.com/',
+})
+assert.equal(initiallyUnknown.lifecycleState, 'SUBMIT_UNKNOWN')
+assert.equal(initiallyUnknown.safeToResubmit, false)
+const idObserved = bridge.markDurableIdObserved(initiallyUnknown, {
+  durableId,
+  now: 1500,
+  lastObservedUrl: `https://chatgpt.com/c/${durableId}`,
+})
+assert.equal(idObserved.lifecycleState, 'SUBMITTED')
+assert.equal(idObserved.durableGenerationId, durableId)
+assert.equal(idObserved.submissionStatus, 'accepted')
+assert.equal(idObserved.safeToResubmit, false)
+
+const timedOut = bridge.markReplyTimeout(submitted, {
+  now: 2000,
+  lastObservedUrl: `https://chatgpt.com/c/${durableId}`,
+})
+assert.equal(timedOut.lifecycleState, 'GENERATION_PENDING')
+assert.equal(timedOut.durableGenerationId, durableId, 'text timeout lost durable ID')
+assert.equal(timedOut.completionStatus, 'unobserved')
+assert.equal(timedOut.safeToResubmit, false, 'timeout was classified safe to resubmit')
+
+const unknown = bridge.markReplyTimeout(
+  bridge.createSubmissionRecord({
+    promptLength: 20,
+    now: 1000,
+    lastObservedUrl: 'https://chatgpt.com/',
+  }),
+  { now: 2000, lastObservedUrl: 'https://chatgpt.com/' }
+)
+assert.equal(unknown.lifecycleState, 'SUBMIT_UNKNOWN')
+assert.equal(unknown.durableGenerationId, null)
+assert.equal(unknown.submissionStatus, 'unknown')
+assert.equal(unknown.safeToResubmit, false)
+
+const completed = bridge.markTextReplyObserved(submitted, {
+  durableId,
+  replyLength: 30,
+  now: 3000,
+  lastObservedUrl: `https://chatgpt.com/c/${durableId}`,
+})
+assert.equal(completed.lifecycleState, 'SUBMITTED')
+assert.equal(completed.submissionStatus, 'accepted')
+assert.equal(completed.completionStatus, 'observed')
+assert.equal(completed.durableGenerationId, durableId)
+assert.equal(completed.turns, 3)
+assert.equal(completed.chars, 150, 'normal text reply accounting changed')
+
+const source = readFileSync(bridgePath, 'utf8')
+assert.match(source, /acquireLock\(\)/, 'single-profile lock acquisition missing')
+assert.match(source, /launchPersistentContext\(PROFILE_DIR/, 'persistent profile launch changed')
+assert.equal(
+  (source.match(/launchPersistentContext\(PROFILE_DIR/g) || []).length,
+  1,
+  'bridge gained another persistent-profile launcher'
+)
+assert.match(source, /process\.stdout\.write\(reply\)/, 'normal text reply stdout behavior changed')
+EOF
+
 # ChatGPT/OpenAI auth transaction behavior (no browser required).
 REPO_ROOT="$REPO_ROOT" node --input-type=module <<'EOF'
 import { strict as assert } from 'node:assert'

@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import { join, basename } from 'node:path'
 import { execSync, execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
+import { createHash } from 'node:crypto'
 import { loadBridgeCreds, credsHelp, maskEmail, resolveBridgeDir, CHATGPT_KEYS } from './bridge-env.mjs'
 import {
   ROUTE_RECOVERY_EXHAUSTED_MESSAGE,
@@ -1152,6 +1153,120 @@ async function clickSend(page) {
   return false
 }
 
+async function waitForConversationId(page, fallbackId = null, timeoutMs = 30000) {
+  if (fallbackId) return fallbackId
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const id = chatIdFromUrl(page.url())
+    if (id) return id
+    await sleep(500)
+  }
+  return chatIdFromUrl(page.url())
+}
+
+export function createSubmissionRecord({
+  previous = null,
+  reused = false,
+  durableId = null,
+  promptSha256 = null,
+  promptLength = 0,
+  now = Date.now(),
+  lastObservedUrl = null,
+} = {}) {
+  const id = durableId || null
+  return {
+    id,
+    durableGenerationId: id,
+    provider: 'chatgpt-web',
+    promptSha256,
+    lifecycleState: id ? 'SUBMITTED' : 'SUBMIT_UNKNOWN',
+    submissionStatus: id ? 'accepted' : 'unknown',
+    completionStatus: 'unobserved',
+    safeToResubmit: false,
+    turns: (reused ? Number(previous?.turns || 0) : 0) + 1,
+    chars: (reused ? Number(previous?.chars || 0) : 0) + promptLength,
+    createdAt: (reused ? previous?.createdAt : now) || now,
+    lastUsedAt: now,
+    submittedAt: new Date(now).toISOString(),
+    lastObservedAt: new Date(now).toISOString(),
+    lastObservedUrl,
+  }
+}
+
+export function markReplyTimeout(record, {
+  durableId = null,
+  now = Date.now(),
+  lastObservedUrl = null,
+} = {}) {
+  const id = durableId || record?.durableGenerationId || record?.id || null
+  return {
+    ...record,
+    id,
+    durableGenerationId: id,
+    lifecycleState: id ? 'GENERATION_PENDING' : 'SUBMIT_UNKNOWN',
+    submissionStatus: id ? 'accepted' : 'unknown',
+    completionStatus: 'unobserved',
+    safeToResubmit: false,
+    lastUsedAt: now,
+    lastObservedAt: new Date(now).toISOString(),
+    lastObservedUrl,
+    textWaitTimedOutAt: new Date(now).toISOString(),
+  }
+}
+
+export function markDurableIdObserved(record, {
+  durableId,
+  now = Date.now(),
+  lastObservedUrl = null,
+} = {}) {
+  if (!durableId) return record
+  return {
+    ...record,
+    id: durableId,
+    durableGenerationId: durableId,
+    lifecycleState: 'SUBMITTED',
+    submissionStatus: 'accepted',
+    completionStatus: 'unobserved',
+    safeToResubmit: false,
+    lastUsedAt: now,
+    lastObservedAt: new Date(now).toISOString(),
+    lastObservedUrl,
+  }
+}
+
+export function markTextReplyObserved(record, {
+  durableId = null,
+  replyLength = 0,
+  now = Date.now(),
+  lastObservedUrl = null,
+} = {}) {
+  const id = durableId || record?.durableGenerationId || record?.id || null
+  return {
+    ...record,
+    id,
+    durableGenerationId: id,
+    lifecycleState: 'SUBMITTED',
+    // Observing an assistant reply proves the submission was accepted even if
+    // this provider session never exposed a durable conversation identifier.
+    submissionStatus: 'accepted',
+    completionStatus: 'observed',
+    safeToResubmit: false,
+    chars: Number(record?.chars || 0) + replyLength,
+    lastUsedAt: now,
+    lastObservedAt: new Date(now).toISOString(),
+    lastObservedUrl,
+    textCompletedAt: new Date(now).toISOString(),
+  }
+}
+
+export class ReplyTimeoutError extends Error {
+  constructor(timeoutSec) {
+    super(`timeout after ${timeoutSec}s waiting for ChatGPT reply`)
+    this.name = 'ReplyTimeoutError'
+    this.code = 'CHATGPT_TEXT_REPLY_TIMEOUT'
+  }
+}
+
 async function waitForReply(page, timeoutSec) {
   const deadline = Date.now() + timeoutSec * 1000
   while (Date.now() < deadline) {
@@ -1171,7 +1286,7 @@ async function waitForReply(page, timeoutSec) {
     }
     await sleep(1500)
   }
-  throw new Error(`timeout after ${timeoutSec}s waiting for ChatGPT reply`)
+  throw new ReplyTimeoutError(timeoutSec)
 }
 
 // ---------- commands ----------
@@ -1420,6 +1535,19 @@ async function doAsk() {
   const chats = loadChats()
   let chat = chats.chats[key] || chats.chats[legacyKey]
 
+  if (
+    !forceNew &&
+    chat?.safeToResubmit === false &&
+    chat?.completionStatus === 'unobserved' &&
+    ['SUBMITTED', 'GENERATION_PENDING', 'SUBMIT_UNKNOWN'].includes(chat.lifecycleState)
+  ) {
+    const durable = chat.durableGenerationId || chat.id || 'unknown'
+    throw new Error(
+      `saved attempt is ${chat.lifecycleState} (durableGenerationId=${durable}, safeToResubmit=false); reconcile it with ` +
+      '`chatgpt-review chats` and the provider conversation before starting new semantic work'
+    )
+  }
+
   if (!forceNew && chat && !isStale(chat, config)) {
     console.error(`[bridge] reusing chat for ${key} (${chat.id}, turns=${chat.turns}, chars=${chat.chars})`)
   } else {
@@ -1488,22 +1616,62 @@ async function doAsk() {
     await typePrompt(page, prompt)
     const sent = await clickSend(page)
     if (!sent) throw new Error('could not click send')
-    const reply = await waitForReply(page, timeoutSec)
 
-    const id = chatIdFromUrl(page.url()) || (reused ? chat.id : null)
-    const now = Date.now()
-    if (id) {
-      chats.chats[key] = {
-        id,
-        turns: (reused ? chat.turns : 0) + 1,
-        chars: (reused ? chat.chars : 0) + prompt.length + reply.length,
-        createdAt: (reused ? chat.createdAt : now) || now,
-        lastUsedAt: now,
+    const submittedAt = Date.now()
+    const immediateId = chatIdFromUrl(page.url()) || (reused ? chat.id : null)
+    let attempt = createSubmissionRecord({
+      previous: chat,
+      reused,
+      durableId: immediateId,
+      promptSha256: createHash('sha256').update(prompt).digest('hex'),
+      promptLength: prompt.length,
+      now: submittedAt,
+      lastObservedUrl: page.url(),
+    })
+    chats.chats[key] = attempt
+    if (legacyKey !== key) delete chats.chats[legacyKey]
+    saveChats(chats)
+
+    if (!immediateId) {
+      const observedId = await waitForConversationId(page)
+      if (observedId) {
+        attempt = markDurableIdObserved(attempt, {
+          durableId: observedId,
+          now: Date.now(),
+          lastObservedUrl: page.url(),
+        })
+        chats.chats[key] = attempt
+        saveChats(chats)
       }
-      if (legacyKey !== key) delete chats.chats[legacyKey]
-      saveChats(chats)
     }
 
+    let reply
+    try {
+      reply = await waitForReply(page, timeoutSec)
+    } catch (error) {
+      if (!(error instanceof ReplyTimeoutError)) throw error
+      attempt = markReplyTimeout(attempt, {
+        durableId: chatIdFromUrl(page.url()),
+        now: Date.now(),
+        lastObservedUrl: page.url(),
+      })
+      chats.chats[key] = attempt
+      saveChats(chats)
+      const durable = attempt.durableGenerationId || 'unknown'
+      throw new Error(
+        `${attempt.lifecycleState}: text completion was not observed; durableGenerationId=${durable}; ` +
+        'safeToResubmit=false. Observe/recover this attempt before any resubmission.'
+      )
+    }
+
+    attempt = markTextReplyObserved(attempt, {
+      durableId: chatIdFromUrl(page.url()),
+      replyLength: reply.length,
+      now: Date.now(),
+      lastObservedUrl: page.url(),
+    })
+    chats.chats[key] = attempt
+    saveChats(chats)
     process.stdout.write(reply)
   } finally {
     await ctx.close()
@@ -1731,19 +1899,21 @@ function withLock(fn) {
   }
 }
 
-if (mode === 'login') { await withLock(doLogin)() }
-else if (mode === 'logout') { await withLock(doLogout)() }
-else if (mode === 'ask') { await withLock(doAsk)() }
-else if (mode === 'status') { await withLock(doStatus)() }
-else if (mode === 'chats') { await doChats() }
-else if (mode === 'reset') { await withLock(doReset)() }
-else if (mode === 'approval') { await withLock(doApproval)() }
-else if (mode === 'project' || mode === 'projects') { await withLock(doProject)() }
-else if (mode === 'sources' || mode === 'src') { await doSources() }
-else if (mode === 'src-sync') { await doSources() }
-else if (mode === 'src-status') { await doSources() }
-else if (mode === 'src-reset') { await doSources() }
-else if (mode === 'src-build') { await doSources() }
-else if (mode === 'src-upload') { await doSources() }
-else if (mode.startsWith('src-')) { await doSources() }
-else { usage(); process.exit(1) }
+if (process.env.CHATGPT_REVIEW_IMPORT_ONLY !== '1') {
+  if (mode === 'login') { await withLock(doLogin)() }
+  else if (mode === 'logout') { await withLock(doLogout)() }
+  else if (mode === 'ask') { await withLock(doAsk)() }
+  else if (mode === 'status') { await withLock(doStatus)() }
+  else if (mode === 'chats') { await doChats() }
+  else if (mode === 'reset') { await withLock(doReset)() }
+  else if (mode === 'approval') { await withLock(doApproval)() }
+  else if (mode === 'project' || mode === 'projects') { await withLock(doProject)() }
+  else if (mode === 'sources' || mode === 'src') { await doSources() }
+  else if (mode === 'src-sync') { await doSources() }
+  else if (mode === 'src-status') { await doSources() }
+  else if (mode === 'src-reset') { await doSources() }
+  else if (mode === 'src-build') { await doSources() }
+  else if (mode === 'src-upload') { await doSources() }
+  else if (mode.startsWith('src-')) { await doSources() }
+  else { usage(); process.exit(1) }
+}
