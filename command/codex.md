@@ -22,8 +22,9 @@ cho repo hiện tại. Chạy trong subtask này, KHÔNG làm bẩn context chí
    - Luôn thêm `-c 'approvals_reviewer="user"'` để một config
      `approvals_reviewer=auto_review` của user/project không âm thầm nâng quyền
      vượt sandbox đã chọn.
-   - KHÔNG dùng `--full-auto`, `--dangerously-bypass-approvals-and-sandbox`
-     hay `danger-full-access`.
+   - KHÔNG dùng `--full-auto`, `--dangerously-bypass-approvals-and-sandbox`,
+     `--yolo`, `--approve-for-me`, `--not-so-yolo`, `danger-full-access`,
+     `--add-dir` hay `--worktree`.
 
 3. Chạy Codex bằng JSONL để lấy exact thread id. Với implementation:
 

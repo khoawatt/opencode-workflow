@@ -83,7 +83,10 @@ codex exec --json --sandbox workspace-write -c 'approvals_reviewer="user"' -
 ```
 
 Do not use `--full-auto`, `--dangerously-bypass-approvals-and-sandbox`,
-`--yolo`, or `danger-full-access` in this adapter.
+`--yolo`, `--approve-for-me`, `--not-so-yolo`, `danger-full-access`,
+`--add-dir`, or `--worktree` in this adapter. The `@codex-worker` bash
+permission policy allows only `codex exec` and explicitly denies these
+escalation/scope-expansion paths.
 
 The explicit `approvals_reviewer="user"` runtime override is intentional
 defense in depth. Current Codex CLI versions can allow an

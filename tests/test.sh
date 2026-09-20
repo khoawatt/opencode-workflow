@@ -27,12 +27,20 @@ grep -q -- '--json' "$REPO_ROOT/command/codex.md" || fail "/codex missing --json
 grep -q -- '--sandbox workspace-write' "$REPO_ROOT/command/codex.md" || fail "/codex missing explicit workspace-write sandbox"
 grep -q 'approvals_reviewer="user"' "$REPO_ROOT/command/codex.md" || fail "/codex missing sandbox escalation guard"
 grep -q 'resume <thread_id>' "$REPO_ROOT/command/codex.md" || fail "/codex missing exact-thread resume"
-grep -q "'codex \*': allow" "$REPO_ROOT/agent/codex-worker.md" || fail "codex worker bash allowlist missing"
-if grep -Eq -- '--full-auto|--dangerously-bypass-approvals-and-sandbox|--yolo|danger-full-access' "$REPO_ROOT/command/codex.md" | grep -vq 'KHÔNG'; then
-  true
-fi
+grep -Fq "'codex exec *': allow" "$REPO_ROOT/agent/codex-worker.md" || fail "codex worker exec-only allowlist missing"
+for denied in \
+  "'codex exec *--full-auto*': deny" \
+  "'codex exec *--dangerously-bypass-approvals-and-sandbox*': deny" \
+  "'codex exec *--yolo*': deny" \
+  "'codex exec *--approve-for-me*': deny" \
+  "'codex exec *--not-so-yolo*': deny" \
+  "'codex exec *danger-full-access*': deny" \
+  "'codex exec *--add-dir*': deny" \
+  "'codex exec *--worktree*': deny"; do
+  grep -Fq "$denied" "$REPO_ROOT/agent/codex-worker.md" || fail "codex worker missing deny rule: $denied"
+done
 # The adapter may mention dangerous flags only to prohibit them; executable examples must stay sandboxed.
-if grep -E '^[[:space:]]*codex exec .*--(full-auto|dangerously-bypass-approvals-and-sandbox|yolo)' "$REPO_ROOT/command/codex.md" "$REPO_ROOT/agent/codex-worker.md" >/dev/null; then
+if grep -E '^[[:space:]]*codex exec .*--(full-auto|dangerously-bypass-approvals-and-sandbox|yolo|approve-for-me|not-so-yolo|add-dir|worktree|sandbox[[:space:]]+danger-full-access)' "$REPO_ROOT/command/codex.md" "$REPO_ROOT/agent/codex-worker.md" >/dev/null; then
   fail "Codex adapter contains a dangerous executable example"
 fi
 grep -q 'agent/codex-worker.md' "$REPO_ROOT/install.sh" || fail "install.sh does not install codex-worker"

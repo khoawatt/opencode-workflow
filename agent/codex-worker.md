@@ -7,7 +7,16 @@ permission:
   websearch: deny
   bash:
     '*': deny
-    'codex *': allow
+    'codex exec': allow
+    'codex exec *': allow
+    'codex exec *--full-auto*': deny
+    'codex exec *--dangerously-bypass-approvals-and-sandbox*': deny
+    'codex exec *--yolo*': deny
+    'codex exec *--approve-for-me*': deny
+    'codex exec *--not-so-yolo*': deny
+    'codex exec *danger-full-access*': deny
+    'codex exec *--add-dir*': deny
+    'codex exec *--worktree*': deny
     'git status': allow
     'git status *': allow
     'git diff': allow
@@ -48,7 +57,9 @@ Codex is an **implementation worker**, not a workflow owner.
    can otherwise override an explicit sandbox in current Codex CLI behavior.
 
    Never use `--full-auto`, `--dangerously-bypass-approvals-and-sandbox`,
-   `--yolo`, or `danger-full-access`.
+   `--yolo`, `--approve-for-me`, `--not-so-yolo`, `danger-full-access`,
+   `--add-dir`, or `--worktree`. The subagent permission policy hard-denies
+   these paths even if a prompt asks for them.
 
 3. Run from the project root using a quoted heredoc so arbitrary prompt text is
    preserved. Implementation example:
