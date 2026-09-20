@@ -256,6 +256,13 @@ grep -q 'CHATGPT_BRIDGE_DIR.*GEMINI_BRIDGE_DIR\|BRIDGE_DIR.*GEMINI' "$REPO_ROOT/
 if [[ -f "$REPO_ROOT/plugin/chatgpt-autoreview.ts" ]]; then
   # plugin is TS, not checked via node --check; ensure it parses as valid TS syntax (basic)
   grep -q "ChatGPTAutoReview" "$REPO_ROOT/plugin/chatgpt-autoreview.ts" || fail "plugin missing ChatGPTAutoReview"
+  # V2 API: must use @opencode/plugin + Plugin.define with stable id (V1 impl does not run on V2)
+  grep -q '@opencode/plugin' "$REPO_ROOT/plugin/chatgpt-autoreview.ts" || fail "plugin missing V2 @opencode/plugin import"
+  grep -q 'Plugin.define' "$REPO_ROOT/plugin/chatgpt-autoreview.ts" || fail "plugin missing V2 Plugin.define"
+  grep -q 'id: "chatgpt-autoreview"' "$REPO_ROOT/plugin/chatgpt-autoreview.ts" || fail "plugin missing stable V2 id"
+  [[ -f "$REPO_ROOT/plugin/package.json" ]] || fail "plugin/package.json missing (V2 dep manifest)"
+  grep -q '@opencode/plugin' "$REPO_ROOT/plugin/package.json" || fail "plugin/package.json missing @opencode/plugin dep"
+  grep -q 'plugins/chatgpt-autoreview' "$REPO_ROOT/install.sh" || fail "install.sh does not install directory-form V2 plugin"
 fi
 if "$REPO_ROOT/templates/merge-approved-pr.sh" --admin >/dev/null 2>&1; then
     fail "merge wrapper accepted a bypass argument"

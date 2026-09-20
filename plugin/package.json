@@ -1,0 +1,9 @@
+{
+  "name": "chatgpt-autoreview",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "ChatGPT auto-review instruction injector for opencode (V2 plugin API)",
+  "dependencies": {
+    "@opencode/plugin": "^2.0.10"
+  }
+}

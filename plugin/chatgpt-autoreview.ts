@@ -1,7 +1,7 @@
 import { readFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
-import type { Plugin } from "@opencode-ai/plugin"
+import { Plugin } from "@opencode/plugin"
 
 const STATE_FILE = join(homedir(), ".config/opencode/chatgpt-bridge/autoreview.json")
 const BRIDGE = join(homedir(), ".config/opencode/chatgpt-bridge/bin/chatgpt-review")
@@ -40,16 +40,43 @@ Do NOT trigger auto-review if you are the \`chatgpt-review\` subagent itself, th
 Do NOT auto-review a task that is purely conversational (no code or files changed).
 Never treat ChatGPT's "approve" as permission to merge — merge is human-only.`
 
-export const ChatGPTAutoReview: Plugin = async () => {
+async function server() {
   return {
-    "shell.env": async (input, output) => {
+    "shell.env": async (_input: unknown, output: { env: Record<string, string> }) => {
       output.env.CHATGPT_AUTO_REVIEW = isAutoReviewEnabled() ? "1" : "0"
       output.env.CHATGPT_REVIEW_BRIDGE = BRIDGE
     },
-    "experimental.chat.system.transform": async (input, output) => {
+    "experimental.chat.system.transform": async (_input: unknown, output: { system: string[] }) => {
       if (isAutoReviewEnabled()) {
         output.system.push(AUTO_REVIEW_INSTRUCTION)
       }
     },
   }
+}
+
+// Kept identifier for backwards compat (tests + old V1 loader).
+export const ChatGPTAutoReview = server
+
+export default {
+  ...Plugin.define({
+    id: "chatgpt-autoreview",
+    async setup(ctx: {
+      shell: { hook: (name: "create.before", fn: (event: { env: Record<string, string> }) => void) => Promise<unknown> }
+      session: { hook: (name: "context", fn: (event: { system: { type: string; text: string }[] }) => void) => Promise<unknown> }
+    }) {
+      await ctx.shell.hook("create.before", (event) => {
+        event.env.CHATGPT_AUTO_REVIEW = isAutoReviewEnabled() ? "1" : "0"
+        event.env.CHATGPT_REVIEW_BRIDGE = BRIDGE
+      })
+
+      await ctx.session.hook("context", (event) => {
+        if (isAutoReviewEnabled()) {
+          event.system.push({ type: "text", text: AUTO_REVIEW_INSTRUCTION })
+        }
+      })
+    },
+  }),
+  async server() {
+    return server()
+  },
 }

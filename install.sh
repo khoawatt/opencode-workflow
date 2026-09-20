@@ -46,7 +46,20 @@ setup_config() {
   [ -f "$REPO_DIR/agent/agy-worker.md" ] && cp "$REPO_DIR/agent/agy-worker.md" "$CFG/agent/"
   for d in "$REPO_DIR/skill/"*/; do [ -d "$d" ] && cp -R "$d" "$CFG/skills/" 2>/dev/null || true; done
   [ -d "$REPO_DIR/command" ] && cp "$REPO_DIR/command/"*.md "$CFG/command/" 2>/dev/null || true
-  [ -f "$REPO_DIR/plugin/chatgpt-autoreview.ts" ] && cp "$REPO_DIR/plugin/chatgpt-autoreview.ts" "$CFG/plugins/"
+  if [ -f "$REPO_DIR/plugin/chatgpt-autoreview.ts" ]; then
+    # V2 local plugin must be a package directory so
+    # `import { Plugin } from "@opencode/plugin"` resolves.
+    mkdir -p "$CFG/plugins/chatgpt-autoreview"
+    cp "$REPO_DIR/plugin/chatgpt-autoreview.ts" "$CFG/plugins/chatgpt-autoreview/index.ts"
+    [ -f "$REPO_DIR/plugin/package.json" ] && cp "$REPO_DIR/plugin/package.json" "$CFG/plugins/chatgpt-autoreview/package.json"
+    # Remove legacy V1 single-file install (conflicts with directory form).
+    [ -f "$CFG/plugins/chatgpt-autoreview.ts" ] && rm -f "$CFG/plugins/chatgpt-autoreview.ts"
+    if command -v npm >/dev/null 2>&1; then
+      (cd "$CFG/plugins/chatgpt-autoreview" && npm install --no-audit --no-fund) || warn "plugin deps install failed; run: cd $CFG/plugins/chatgpt-autoreview && npm install"
+    else
+      warn "npm not found; plugin deps not installed (cd $CFG/plugins/chatgpt-autoreview && npm install)"
+    fi
+  fi
   # session-auth for Gemini classifier (port from codex-workflow) + shared .env loader
   [ -f "$REPO_DIR/bin/session-auth.mjs" ] && cp "$REPO_DIR/bin/session-auth.mjs" "$BRIDGE/bin/" 2>/dev/null || true
   [ -f "$REPO_DIR/bin/session-auth.mjs" ] && cp "$REPO_DIR/bin/session-auth.mjs" "$GEMINI/bin/" 2>/dev/null || true
