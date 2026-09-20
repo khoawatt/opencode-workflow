@@ -26,8 +26,10 @@ task/scope authority
 OpenCode Primary Build Agent
         |
         +--> Superpowers            workflow / methodology
-        +--> @vision                Gemini Flash-class multimodal, visual analysis only
-        +--> @chatgpt-review        dispatcher: sends result summaries to ChatGPT Web via browser bridge
+        +--> @agy-worker             delegated Antigravity implementation worker
+        +--> @codex-worker           delegated Codex implementation worker
+        +--> @vision                 Gemini Flash-class multimodal, visual analysis only
+        +--> @chatgpt-review         dispatcher: sends result summaries to ChatGPT Web via browser bridge
         |
         v
 implementation
@@ -66,6 +68,7 @@ merge / deploy decision
 | Task scope authority | GitHub Issue |
 | Planning/spec preparation | ChatGPT Web |
 | Implementation | OpenCode Primary Build Agent |
+| Delegated implementation | `@agy-worker` / `@codex-worker` under OpenCode ownership |
 | Workflow/methodology | Superpowers |
 | Visual understanding | `@vision` |
 | Review dispatch (bridge) | `@chatgpt-review` |
@@ -119,21 +122,34 @@ and safe merge is not obvious — report, propose a minimal merge, wait for appr
 
 ---
 
-## 4. Specialized agents
+## 4. Specialized agents and delegated workers
 
 ```text
 OpenCode
 ├── Primary Build Agent
 ├── Superpowers
+├── @agy-worker       (delegated implementation via Antigravity CLI)
+├── @codex-worker     (delegated implementation via Codex CLI)
 ├── @vision           (visual analysis only)
 └── @chatgpt-review   (dispatches result summary → ChatGPT Web for independent review)
 ```
 
+- `@agy-worker` and `@codex-worker` are implementation backends under the
+  Primary Build Agent. They may edit/test only inside the delegated scope and
+  leave the working tree for OpenCode to verify. They do not own approval state,
+  PR merge authority, or workflow transitions.
+- `@codex-worker` uses non-interactive `codex exec`, explicit
+  `read-only`/`workspace-write` sandboxing and exact-thread resume. It must not
+  use dangerous sandbox bypass flags. See `docs/CODEX_USAGE.md`.
 - `@vision`: analysis-only; no file edits; no bash. Model: verified Gemini
   Flash-class multimodal ID (e.g. `google/gemini-3.6-flash` if recognized).
 - `@chatgpt-review`: read-only dispatcher; forwards the implementing agent's
   result summary to ChatGPT Web via the browser bridge and returns a
   machine-actionable verdict. See `docs/WORKFLOW.md`.
+
+**Delegation invariant:** an external worker may modify the working tree, but it
+never owns workflow state. OpenCode remains responsible for scope checking,
+completion decisions and review handoff.
 
 ---
 
@@ -238,6 +254,7 @@ secret *names*, never values.
 
 - valid project config; Superpowers works; Primary can safely use git/gh;
 - destructive ops prompt for confirmation (`ask`); `@vision` available, analysis-only;
+- delegated `@agy-worker` / `@codex-worker` remain implementation-only and never own approval/merge state;
 - `@chatgpt-review` dispatcher available; no authoritative `@reviewer`;
 - ChatGPT Web documented as independent reviewer; GitHub Actions is automated
   verification; GitHub Issue is scope authority; self-review is pre-PR only;

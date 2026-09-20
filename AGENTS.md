@@ -30,8 +30,10 @@ Then tell the human to restart opencode.
 1. Copies opencode config into `~/.config/opencode/`:
    - `agent/chatgpt-review.md` — the `@chatgpt-review` subagent
    - `agent/gemini-review.md` — the `@gemini-review` subagent (second opinion)
+   - `agent/agy-worker.md` — delegated Antigravity implementation worker
+   - `agent/codex-worker.md` — delegated Codex implementation worker
    - `skills/chatgpt-review/` + `skills/gemini-review/` — the skills
-   - `command/*.md` — `/autoreview`, `/chatgpt-new`, `/gemini-new`, `/chatgpt-project`
+   - `command/*.md` — review/project commands plus `/agy` and `/codex`
    - `plugin/chatgpt-autoreview.ts` — auto-review toggle plugin
    - bridge binaries + `package.json` + default configs
 2. `npm install` (playwright) into `~/.config/opencode/chatgpt-bridge/` and
@@ -39,6 +41,10 @@ Then tell the human to restart opencode.
 3. Installs Playwright Chromium (shared by both bridges).
 4. Installs Chromium system libraries (sudo if available, else user-space `.deb`
    extraction into `~/.config/opencode/chatgpt-bridge/libs/`).
+
+Delegated worker binaries are external prerequisites. `install.sh` installs only
+OpenCode adapters for `/agy` and `/codex`; it does not install/authenticate
+Antigravity CLI or Codex CLI. See `docs/AGY_USAGE.md` and `docs/CODEX_USAGE.md`.
 
 ## Expected state after setup
 

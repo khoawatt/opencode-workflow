@@ -17,6 +17,25 @@ bash -n "$REPO_ROOT/bin/chatgpt-review" "$REPO_ROOT/bin/gemini-review" 2>/dev/nu
 node --check "$REPO_ROOT/bin/chatgpt-review.mjs"
 node --check "$REPO_ROOT/bin/gemini-review.mjs"
 node --check "$REPO_ROOT/bin/chatgpt-auth-flow.mjs"
+
+# Delegated Codex worker contract (static: no Codex binary/network required).
+[[ -f "$REPO_ROOT/command/codex.md" ]] || fail "command/codex.md missing"
+[[ -f "$REPO_ROOT/agent/codex-worker.md" ]] || fail "agent/codex-worker.md missing"
+[[ -f "$REPO_ROOT/docs/CODEX_USAGE.md" ]] || fail "docs/CODEX_USAGE.md missing"
+grep -q 'codex exec' "$REPO_ROOT/command/codex.md" || fail "/codex does not use codex exec"
+grep -q -- '--json' "$REPO_ROOT/command/codex.md" || fail "/codex missing --json session capture"
+grep -q -- '--sandbox workspace-write' "$REPO_ROOT/command/codex.md" || fail "/codex missing explicit workspace-write sandbox"
+grep -q 'approvals_reviewer="user"' "$REPO_ROOT/command/codex.md" || fail "/codex missing sandbox escalation guard"
+grep -q 'resume <thread_id>' "$REPO_ROOT/command/codex.md" || fail "/codex missing exact-thread resume"
+grep -q "'codex \*': allow" "$REPO_ROOT/agent/codex-worker.md" || fail "codex worker bash allowlist missing"
+if grep -Eq -- '--full-auto|--dangerously-bypass-approvals-and-sandbox|--yolo|danger-full-access' "$REPO_ROOT/command/codex.md" | grep -vq 'KHÔNG'; then
+  true
+fi
+# The adapter may mention dangerous flags only to prohibit them; executable examples must stay sandboxed.
+if grep -E '^[[:space:]]*codex exec .*--(full-auto|dangerously-bypass-approvals-and-sandbox|yolo)' "$REPO_ROOT/command/codex.md" "$REPO_ROOT/agent/codex-worker.md" >/dev/null; then
+  fail "Codex adapter contains a dangerous executable example"
+fi
+grep -q 'agent/codex-worker.md' "$REPO_ROOT/install.sh" || fail "install.sh does not install codex-worker"
 if [[ -f "$REPO_ROOT/bin/session-auth.mjs" ]]; then
   node --check "$REPO_ROOT/bin/session-auth.mjs"
 fi
@@ -326,6 +345,8 @@ printf '{"max_turns": 7}\n' > "$chatgpt_bridge/bridge-config.json"
 
 HOME="$chatgpt_home" \
     bash "$REPO_ROOT/install.sh" --config >/dev/null 2>&1 || true
+[[ -f "$chatgpt_home/.config/opencode/agent/codex-worker.md" ]] || fail "install --config did not install codex-worker"
+[[ -f "$chatgpt_home/.config/opencode/command/codex.md" ]] || fail "install --config did not install /codex command"
 [[ -f "$chatgpt_bridge/bridge-config.json" ]] || fail "bridge config not present after install --config"
 [[ -f "$chatgpt_bridge/bin/chatgpt-auth-flow.mjs" ]] || fail "ChatGPT auth-flow helper was not installed"
 grep -Fxq '{"max_turns": 7}' "$chatgpt_bridge/bridge-config.json" ||

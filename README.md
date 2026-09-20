@@ -61,6 +61,18 @@ Chi tiết: [`docs/SETUP.md`](docs/SETUP.md).
 - Fallback an toàn: chat/project lưu bị hỏng → tự mở mới, không crash.
 - Headful (mặc định) để vượt Cloudflare; có thể thử `--headless`.
 
+### Delegated implementation workers
+
+OpenCode có thể giao phần implementation nặng sang worker CLI mà vẫn giữ ownership
+workflow ở Primary agent:
+
+- `/agy <task>` / `@agy-worker` → Antigravity CLI worker.
+- `/codex <task>` / `@codex-worker` → OpenAI Codex CLI worker chạy bằng
+  `codex exec`, sandbox explicit và resume theo exact `thread_id`.
+
+Cả hai worker chỉ làm task được giao + để lại working tree cho OpenCode kiểm tra;
+không được sở hữu approval/merge state. Chi tiết Codex: [docs/CODEX_USAGE.md](docs/CODEX_USAGE.md).
+
 ---
 
 ## Cài đặt
@@ -123,7 +135,11 @@ cd ~/.config/opencode/chatgpt-bridge && npm install
 
 ```bash
 cp agent/chatgpt-review.md       ~/.config/opencode/agent/
+cp agent/agy-worker.md            ~/.config/opencode/agent/
+cp agent/codex-worker.md          ~/.config/opencode/agent/
 cp -r skill/chatgpt-review       ~/.config/opencode/skills/
+cp command/agy.md                ~/.config/opencode/command/
+cp command/codex.md              ~/.config/opencode/command/
 cp command/autoreview.md         ~/.config/opencode/command/
 cp command/chatgpt-new.md        ~/.config/opencode/command/
 cp command/chatgpt-project.md    ~/.config/opencode/command/
@@ -304,6 +320,8 @@ Gemini nhận cùng envelope workflow và trả về cùng format verdict
 README.md                      # tổng quan
 docs/ARCHITECTURE.md           # kiến trúc + execution contract (phân quyền, policy)
 docs/WORKFLOW.md               # review workflow: envelope, state machine, anti-loop
+docs/AGY_USAGE.md              # Antigravity delegated worker
+docs/CODEX_USAGE.md            # Codex CLI delegated worker
 docs/SETUP.md                  # cài máy mới + opencode-work
 install.sh                     # setup global bridge (config + npm + chromium + libs)
 install-project.sh             # cài policy + .opencode vào 1 repo (merge, không ghi đè)
@@ -315,9 +333,11 @@ bin/autoreview                 # toggle auto-review state
 bin/opencode-work              # tmux launcher chạy nhiều repo song song
 agent/chatgpt-review.md        # subagent dispatcher (workflow-aware, heredoc stdin)
 agent/gemini-review.md         # subagent second-opinion reviewer (Gemini web)
+agent/agy-worker.md            # delegated Antigravity implementation worker
+agent/codex-worker.md          # delegated Codex implementation worker
 skill/chatgpt-review/          # skill hướng dẫn
 skill/gemini-review/           # skill hướng dẫn Gemini bridge
-command/*.md                   # /autoreview /chatgpt-new /gemini-new /chatgpt-project
+command/*.md                   # review/project commands + /agy + /codex delegation
 plugin/chatgpt-autoreview.ts   # plugin: chèn chỉ dẫn auto-review + env
 templates/opencode.jsonc       # policy chuẩn (Superpowers + permission)
 templates/AGENTS.collaboration.md  # mục collaboration chuẩn
@@ -336,7 +356,7 @@ bridge-config.json             # cấu hình ngưỡng + chế độ project
 5. (tùy chọn) `~/.config/opencode/gemini-bridge/bin/gemini-review login` → đăng nhập Google → `status` → `loggedIn: true`
 6. `bash install-project.sh <repo>` cho từng repo
 7. `cp bin/opencode-work ~/.local/bin/` (tmux launcher)
-8. Restart opencode → `@chatgpt-review` / `@gemini-review` dùng được ngay.
+8. Restart opencode → `@chatgpt-review`, `@gemini-review`, `/agy`, `/codex` dùng được ngay (worker CLI phải được cài/auth riêng).
 
 Hoặc đưa repo cho bất kỳ agent nào kèm `AGENTS.md` — agent tự chạy mọi bước theo runbook.
 
