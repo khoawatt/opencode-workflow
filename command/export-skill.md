@@ -1,45 +1,134 @@
 ---
-description: Tạo skill/playbook markdown mới và export vào workflow-playbooks
+description: Tạo bản nháp skill/knowledge reusable vào Linux staging directory để review trước khi promote vào storage
 agent: build
 ---
 
-Bạn là skill exporter cho repo `workflow-playbooks`.
+Bạn là skill/knowledge exporter cho OpenCode.
 
-Xác định đường dẫn repo `workflow-playbooks` theo thứ tự ưu tiên:
-1. Biến môi trường `$WORKFLOW_PLAYBOOKS_DIR` (nếu có).
-2. Sibling directory: `../workflow-playbooks` (hoặc `../../workflow-playbooks`).
-3. Tìm kiếm trong `$HOME/projects/**/workflow-playbooks`.
+User gọi:
 
-Nếu không tìm thấy, thông báo rõ ràng cho user để cung cấp đường dẫn hoặc gán `$WORKFLOW_PLAYBOOKS_DIR`.
+`/export-skill <mô tả skill hoặc bài học cần lưu>`
 
-User gọi: `/export-skill <mô tả skill>` — `$ARGUMENTS` chính là mô tả skill cần tạo.
+`$ARGUMENTS` là toàn bộ mô tả sau `/export-skill`.
 
-Nhiệm vụ (thực hiện ngay, không hỏi lại trừ khi thiếu info nghiêm trọng):
+## Staging directory
 
-1. Phân tích `$ARGUMENTS` để trích:
-   - Tên skill (đặt `lowercase-kebab-case.md`, acronym lowercased theo `meta/naming-conventions.md`)
-   - Category phù hợp trong `docs/` (`ai-agents`, `architecture`, `deployment`, `guides`, `interview`, `seo`) — chọn folder khớp nhất, chỉ tạo folder mới khi không có category nào phù hợp.
-   - Nội dung: Purpose / When to use / Preconditions / Workflow / Validation / Troubleshooting / References (theo `templates/playbook-template.md`).
+Xác định thư mục staging theo thứ tự:
 
-2. Tạo file tại `docs/<category>/<tên-file>.md` trong workflow-playbooks:
-   - Đọc `meta/naming-conventions.md` và `templates/playbook-template.md` trước khi đặt tên/viết.
-   - Nội dung phải là skill/playbook reusable, có ví dụ lệnh cụ thể, có bảng troubleshooting, có References tới case thực tế nếu có.
-   - Nếu skill liên quan tới Google Docs + ảnh, tham khảo `docs/guides/google-docs-image-reading-guide.md` như mẫu.
+1. `$SKILL_EXPORT_DIR` nếu biến môi trường được đặt.
+2. Mặc định: `$HOME/tmp/skill`.
 
-3. Cập nhật `docs/index.md`:
-   - Thêm 1 dòng vào bảng index với 5 cột: Document | Category | Purpose | When to use | Path
-   - Giữ bảng sort theo Category, không xóa dòng cũ.
+Nếu thư mục chưa tồn tại, tạo nó.
 
-4. Báo kết quả ngắn gọn:
-   - Đường dẫn file đã tạo
-   - Category và lý do chọn
-   - Dòng index đã thêm
+Không phụ thuộc vào repo `workflow-playbooks`.
+Không ghi trực tiếp vào repo `storage` trừ khi user yêu cầu rõ ràng trong một bước riêng.
 
-Quy tắc:
-- Không tạo file ngoài `workflow-playbooks/docs/*` trừ khi user chỉ định.
-- Tên file `lowercase-kebab-case.md`, không underscore, không space.
-- Nếu `$ARGUMENTS` quá ngắn/trống → yêu cầu user bổ sung mô tả 1 câu.
+## Nhiệm vụ
 
-Ví dụ gọi:
-- `/export-skill skill đọc Google Docs kèm ảnh qua docx export`
-- `/export-skill playbook xử lý race condition khi mua hàng với Supabase Postgres`
+Thực hiện ngay, chỉ hỏi lại nếu `$ARGUMENTS` trống hoặc thiếu thông tin đến mức không thể xác định chủ đề.
+
+### 1. Trích reusable knowledge
+
+Từ `$ARGUMENTS` và context hiện tại:
+
+- xác định problem/lesson/pattern cần lưu;
+- tách reusable knowledge khỏi chi tiết chỉ đúng với project hiện tại;
+- giữ tên công nghệ khi công nghệ đó là subject thực sự;
+- không đưa secret, token, credential, private identifier hoặc dữ liệu nhạy cảm vào draft.
+
+### 2. Đặt tên file
+
+Dùng `lowercase-kebab-case.md`.
+
+Tên nên phản ánh subject thật, ví dụ:
+
+- `google-docs-image-reading-guide.md`
+- `supabase-postgres-race-condition-playbook.md`
+- `opencode-review-recovery-pattern.md`
+
+Không thêm brand/project name chỉ vì đó là nơi pattern được phát hiện.
+
+### 3. Tạo draft trong staging
+
+Tạo:
+
+```text
+$SKILL_EXPORT_DIR/<file>.md
+```
+
+hoặc mặc định:
+
+```text
+$HOME/tmp/skill/<file>.md
+```
+
+Cấu trúc tối thiểu:
+
+```markdown
+# <Title>
+
+## Purpose
+## When to use
+## Reusable pattern
+## Preconditions
+## Workflow
+## Validation
+## Troubleshooting
+## Source context
+## Promotion checklist
+```
+
+Quy tắc nội dung:
+
+- `Reusable pattern` phải viết generic, không phụ thuộc project nguồn.
+- `Source context` chỉ lưu evidence cần thiết để review; đánh dấu rõ đây là phần tạm.
+- Nếu có path máy cá nhân, repo name, issue/PR/commit cụ thể, đưa vào `Source context`, không đưa vào reusable core.
+- Nếu pattern chỉ hữu ích cho một project cụ thể, ghi rõ `project-specific; do not promote to storage`.
+- Nếu nội dung trùng một canonical document đã biết, ghi `merge candidate` thay vì đề xuất tạo tài liệu mới.
+
+### 4. Promotion checklist
+
+Draft phải có checklist:
+
+- [ ] Reusable ngoài project nguồn
+- [ ] Không chứa secret/private data
+- [ ] Project/brand residue đã loại khỏi reusable core
+- [ ] Machine-specific paths đã parameterize
+- [ ] Không duplicate canonical knowledge
+- [ ] Nếu đã có canonical doc, merge thay vì tạo file mới
+- [ ] Destination trong `storage` đã được xác định
+- [ ] Source context tạm đã được xóa hoặc rút gọn trước khi promote
+
+### 5. Báo kết quả
+
+Trả về ngắn gọn:
+
+- path draft;
+- tên file;
+- reusable subject;
+- trạng thái: `new candidate`, `merge candidate`, hoặc `project-specific`;
+- destination gợi ý trong `storage` nếu đủ rõ.
+
+## Boundary
+
+`/export-skill` chỉ tạo **staging draft**.
+
+Pipeline chuẩn:
+
+```text
+working context
+→ /export-skill
+→ $HOME/tmp/skill/*.md
+→ review
+→ generalize
+→ deduplicate
+→ promote/merge into storage
+```
+
+Không tự động:
+
+- tạo category mới trong `storage`;
+- cập nhật index;
+- xóa source document;
+- commit/push vào `storage`;
+- biến project history thành durable knowledge nếu chưa review.
