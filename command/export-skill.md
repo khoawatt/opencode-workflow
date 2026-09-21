@@ -20,7 +20,6 @@ Xác định thư mục staging theo thứ tự:
 
 Nếu thư mục chưa tồn tại, tạo nó.
 
-Không phụ thuộc vào repo `workflow-playbooks`.
 Không ghi trực tiếp vào repo `storage` trừ khi user yêu cầu rõ ràng trong một bước riêng.
 
 ## Nhiệm vụ
